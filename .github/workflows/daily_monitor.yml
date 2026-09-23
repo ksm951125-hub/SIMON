@@ -24,9 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      NAVER_EMAIL_ADDRESS: ${{ secrets.NAVER_EMAIL_ADDRESS }}
-      NAVER_EMAIL_APP_PASSWORD: ${{ secrets.NAVER_EMAIL_APP_PASSWORD }}
-      NAVER_EMAIL_RECIPIENT: ${{ secrets.NAVER_EMAIL_RECIPIENT }}
+      GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      ALERT_EMAIL_RECIPIENT: ${{ secrets.ALERT_EMAIL_RECIPIENT }}
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repository

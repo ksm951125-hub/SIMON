@@ -12,7 +12,7 @@ from detector import is_drop
 from market_calendar import KST, SessionContext, get_session_context
 from market_data import download_market_data, verify_candidates
 from news import fetch_news
-from notifier import send_naver_email
+from notifier import send_gmail_email
 from report import render_markdown, write_reports
 from sp500 import load_constituents
 
@@ -21,8 +21,8 @@ LOGGER = logging.getLogger("sp500_monitor")
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="S&P 500 일일 10% 급락 모니터")
-    parser.add_argument("--dry-run", action="store_true", help="Naver 메일 알림을 보내지 않습니다")
-    parser.add_argument("--notify", action="store_true", help="Naver 메일 Secret이 있으면 알림을 보냅니다")
+    parser.add_argument("--dry-run", action="store_true", help="이메일 알림을 보내지 않습니다")
+    parser.add_argument("--notify", action="store_true", help="Gmail Secret이 있으면 이메일 알림을 보냅니다")
     parser.add_argument("--session-date", type=date.fromisoformat, help="테스트용 미국 거래일(YYYY-MM-DD)")
     return parser.parse_args()
 
@@ -51,7 +51,7 @@ def run(args: argparse.Namespace) -> int:
         LOGGER.info(context.reason)
         LOGGER.info("결과 파일: %s", ", ".join(str(path) for path in paths))
         if args.notify and not args.dry_run:
-            send_naver_email(markdown, f"[S&P 500 급락 모니터링] {report_date.isoformat()} 휴장")
+            send_gmail_email(markdown, f"[S&P 500 급락 모니터링] {report_date.isoformat()} 휴장")
         print(markdown)
         return 0
 
@@ -104,10 +104,10 @@ def run(args: argparse.Namespace) -> int:
     LOGGER.info("결과 파일: %s", ", ".join(str(path) for path in paths))
     if args.notify and not args.dry_run:
         subject = f"[S&P 500 급락 모니터링] {context.session_date.isoformat()} - {len(candidates)}개"
-        sent = send_naver_email(markdown, subject)
-        LOGGER.info("Naver 메일 전송: %s", "완료" if sent else "건너뜀")
+        sent = send_gmail_email(markdown, subject)
+        LOGGER.info("Gmail 전송: %s", "완료" if sent else "건너뜀")
     else:
-        LOGGER.info("dry-run/알림 비활성: Naver 메일 전송 안 함")
+        LOGGER.info("dry-run/알림 비활성: 이메일 전송 안 함")
     print(markdown)
     return 0
 

@@ -1,6 +1,6 @@
 # S&P 500 급락 자동 모니터
 
-미국 정규장이 끝난 뒤 S&P 500 전 구성종목을 확인해 전 거래일 대비 종가가 10.0% 이상 하락한 종목을 찾고, CSV/JSON/Markdown 보고서를 저장한 뒤 Naver 메일로 보냅니다. PC가 꺼져 있어도 GitHub Actions가 실행합니다.
+미국 정규장이 끝난 뒤 S&P 500 전 구성종목을 확인해 전 거래일 대비 종가가 10.0% 이상 하락한 종목을 찾고, CSV/JSON/Markdown 보고서를 저장한 뒤 Gmail에서 지정한 수신 메일로 보냅니다. PC가 꺼져 있어도 GitHub Actions가 실행합니다.
 
 ## 동작 방식
 
@@ -50,17 +50,17 @@ git push -u origin main
 
 비공개 저장소도 사용할 수 있습니다. GitHub 인증은 브라우저 또는 Git Credential Manager 안내에 따라 본인이 완료해야 합니다.
 
-## Naver 메일 설정
+## Gmail 발송 설정
 
-1. Naver 메일의 **환경설정 → POP3/IMAP 설정 → POP3/SMTP 사용**을 켭니다.
-2. Naver 계정에서 **2단계 인증**을 켜고 **애플리케이션 비밀번호**를 생성합니다. 일반 로그인 비밀번호는 사용할 수 없습니다.
+1. 발신 Google 계정에서 **2단계 인증**을 켭니다.
+2. [Google 앱 비밀번호](https://myaccount.google.com/apppasswords)에서 GitHub Actions용 16자리 앱 비밀번호를 생성합니다. 일반 Google 로그인 비밀번호는 사용할 수 없습니다.
 3. GitHub 저장소의 **Settings → Secrets and variables → Actions → New repository secret**에서 아래 값을 만듭니다.
 
 | Secret | 값 |
 |---|---|
-| `NAVER_EMAIL_ADDRESS` | `master1256@naver.com` |
-| `NAVER_EMAIL_APP_PASSWORD` | Naver에서 생성한 애플리케이션 비밀번호 |
-| `NAVER_EMAIL_RECIPIENT` | `master1256@naver.com` (선택, 생략하면 발신 주소와 동일) |
+| `GMAIL_ADDRESS` | `seminfam11@gmail.com` |
+| `GMAIL_APP_PASSWORD` | Google에서 생성한 16자리 앱 비밀번호 |
+| `ALERT_EMAIL_RECIPIENT` | `master1256@naver.com` |
 
 Secret이 없으면 모니터와 보고서 생성은 성공하고 메일 전송만 건너뜁니다. 비밀번호를 파일, 커밋, 채팅, Actions 로그에 넣지 마십시오.
 
@@ -80,7 +80,7 @@ GitHub의 **Actions → S&P 500 Daily Drop Monitor → Run workflow**에서 수�
 2. `Run unit tests`와 `Run monitor` 로그를 확인합니다.
 3. 구성종목 다운로드 실패 시 `data/sp500_constituents.csv` 캐시 사용 여부를 확인합니다.
 4. 가격 누락은 로그와 Markdown/JSON 보고서의 누락 목록에 표시됩니다.
-5. 메일만 오지 않으면 Naver의 POP3/SMTP 사용 설정, 2단계 인증, 두 필수 Secret 이름, 애플리케이션 비밀번호를 확인합니다.
+5. 메일만 오지 않으면 Google 2단계 인증, 세 Secret 이름, 앱 비밀번호, Naver 스팸함을 확인합니다.
 
 ## 파일 구조
 
@@ -93,7 +93,7 @@ detector.py             등락률 및 임계치
 validator.py            데이터 무결성 검사
 news.py                 후보 뉴스와 보수적인 원인 분류
 report.py               CSV/JSON/Markdown 보고서
-notifier.py             Naver SMTP 메일 알림
+notifier.py             Gmail SMTP 메일 알림
 tests/                  단위 테스트
 .github/workflows/      자동 실행 설정
 ```
