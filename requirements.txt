@@ -1,0 +1,6 @@
+pandas>=2.2,<3.0
+yfinance>=0.2.54,<2.0
+pandas-market-calendars>=4.6,<6.0
+requests>=2.32,<3.0
+beautifulsoup4>=4.12,<5.0
+pytest>=8.3,<9.0

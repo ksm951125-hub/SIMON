@@ -1,0 +1,63 @@
+name: S&P 500 Daily Drop Monitor
+
+on:
+  schedule:
+    # 23:07 UTC Monday-Friday = 08:07 KST Tuesday-Saturday (KST has no DST).
+    # A non-zero minute avoids GitHub Actions' documented top-of-hour peak.
+    - cron: "7 23 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      session_date:
+        description: "Optional US session date (YYYY-MM-DD)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sp500-drop-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NAVER_EMAIL_ADDRESS: ${{ secrets.NAVER_EMAIL_ADDRESS }}
+      NAVER_EMAIL_PASSWORD: ${{ secrets.NAVER_EMAIL_PASSWORD }}
+      NAVER_EMAIL_RECIPIENT: ${{ secrets.NAVER_EMAIL_RECIPIENT }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest -q
+
+      - name: Run monitor
+        shell: bash
+        run: |
+          args=(--notify)
+          if [[ -n "${{ inputs.session_date }}" ]]; then
+            args+=(--session-date "${{ inputs.session_date }}")
+          fi
+          python main.py "${args[@]}"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sp500-drop-report-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 90
