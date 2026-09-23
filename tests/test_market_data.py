@@ -2,7 +2,8 @@ from datetime import date
 
 import pandas as pd
 
-from market_data import _parse_ticker
+from market_data import _parse_ticker, download_market_data
+from config import Settings
 
 
 def test_missing_session_is_reported():
@@ -40,3 +41,47 @@ def test_valid_data_calculates_metrics():
 
 
 import pytest
+
+
+def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypatch, tmp_path):
+    session_date = date(2025, 1, 3)
+    previous_session_date = date(2025, 1, 2)
+    dates = pd.bdate_range("2024-11-25", session_date)
+    tickers = [f"T{index:02d}" for index in range(30)]
+    constituents = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "yahoo_ticker": tickers,
+            "company_name": tickers,
+            "sector": "Test",
+        }
+    )
+    calls = []
+
+    def fake_download(requested, start, end, settings, *, threads=True):
+        calls.append((list(requested), threads))
+        columns = pd.MultiIndex.from_product(
+            [["Open", "Low", "Close", "Volume"], requested]
+        )
+        data = pd.DataFrame(100.0, index=dates, columns=columns)
+        data.loc[:, pd.IndexSlice["Volume", :]] = 1000.0
+        if threads is not False:
+            data.loc[pd.Timestamp(previous_session_date), pd.IndexSlice["Close", :]] = float("nan")
+        return data
+
+    monkeypatch.setattr("market_data._download_batch", fake_download)
+    settings = Settings(
+        batch_size=30,
+        cache_file=tmp_path / "constituents.csv",
+        output_dir=tmp_path / "output",
+        yfinance_cache_dir=tmp_path / "yf-cache",
+    )
+
+    prices, missing = download_market_data(
+        constituents, session_date, previous_session_date, settings
+    )
+
+    assert len(prices) == 30
+    assert missing == {}
+    assert calls[0][1] is True
+    assert [len(batch) for batch, threads in calls[1:] if threads is False] == [20, 10]

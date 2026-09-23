@@ -118,10 +118,22 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    args = _parse_args()
     try:
-        return run(_parse_args())
-    except Exception:
+        return run(args)
+    except Exception as exc:
         LOGGER.exception("모니터 실행 실패")
+        if args.notify and not args.dry_run:
+            try:
+                sent = send_gmail_email(
+                    "S&P 500 급락 모니터링 실행이 실패했습니다.\n\n"
+                    f"오류: {type(exc).__name__}: {exc}\n\n"
+                    "GitHub Actions 실행 로그를 확인해 주세요.\n",
+                    "[S&P 500 급락 모니터링] 실행 실패",
+                )
+                LOGGER.info("실패 알림 Gmail 전송: %s", "완료" if sent else "건너뜀")
+            except Exception:
+                LOGGER.exception("실패 알림 Gmail 전송도 실패")
         return 1
 
 

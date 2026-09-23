@@ -18,7 +18,14 @@ def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
-def _download_batch(tickers: list[str], start: date, end: date, settings: Settings) -> pd.DataFrame:
+def _download_batch(
+    tickers: list[str],
+    start: date,
+    end: date,
+    settings: Settings,
+    *,
+    threads: bool | int = True,
+) -> pd.DataFrame:
     last_error: Exception | None = None
     for attempt in range(1, settings.download_retries + 1):
         try:
@@ -30,7 +37,7 @@ def _download_batch(tickers: list[str], start: date, end: date, settings: Settin
                 auto_adjust=True,
                 actions=False,
                 group_by="column",
-                threads=True,
+                threads=threads,
                 timeout=settings.download_timeout_seconds,
                 progress=False,
             )
@@ -106,7 +113,9 @@ def download_market_data(
     settings: Settings = SETTINGS,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     tickers = constituents["yahoo_ticker"].tolist()
-    start = previous_session_date - timedelta(days=45)
+    # Leave ample room for 20 completed sessions even around holiday-heavy
+    # periods and occasional missing Yahoo rows.
+    start = previous_session_date - timedelta(days=60)
     end = session_date + timedelta(days=2)
     missing: dict[str, str] = {}
     records: list[dict] = []
@@ -131,18 +140,32 @@ def download_market_data(
             elif row:
                 records.append(row)
 
-    # A batch can be non-empty while Yahoo omits a few symbols. Retry a small
-    # partial failure once as its own batch; a large failure is systemic and is
-    # handled by the coverage guard instead of repeating the whole universe.
+    # A batch can be non-empty while Yahoo silently returns NaN rows for many
+    # symbols. This happened in production with 443/503 symbols: because the
+    # response itself was non-empty, the ordinary download retry never ran.
+    # Retry every parse failure in smaller, single-threaded batches. Limiting
+    # retries to only a handful of missing symbols makes a transient provider
+    # problem indistinguishable from a permanent outage.
     retry_tickers = list(missing)
-    if retry_tickers and len(retry_tickers) <= 25:
-        LOGGER.info("누락 ticker %d개를 한 번 더 조회합니다", len(retry_tickers))
-        try:
-            retry_data = _download_batch(retry_tickers, start, end, settings)
-            for ticker in retry_tickers:
+    if retry_tickers:
+        retry_batch_size = min(settings.batch_size, 20)
+        LOGGER.info(
+            "누락 ticker %d개를 %d개씩 단일 스레드로 재조회합니다",
+            len(retry_tickers),
+            retry_batch_size,
+        )
+        for retry_batch in _chunks(retry_tickers, retry_batch_size):
+            try:
+                retry_data = _download_batch(
+                    retry_batch, start, end, settings, threads=False
+                )
+            except Exception as exc:
+                LOGGER.warning("누락 ticker 재조회 실패 (%d개): %s", len(retry_batch), exc)
+                continue
+            for ticker in retry_batch:
                 row, error = _parse_ticker(
                     ticker,
-                    _ticker_frame(retry_data, ticker, len(retry_tickers)),
+                    _ticker_frame(retry_data, ticker, len(retry_batch)),
                     session_date,
                     previous_session_date,
                 )
@@ -151,8 +174,6 @@ def download_market_data(
                 elif row:
                     records.append(row)
                     missing.pop(ticker, None)
-        except Exception as exc:
-            LOGGER.warning("누락 ticker 재조회 실패: %s", exc)
 
     prices = pd.DataFrame(records)
     if prices.empty:
@@ -174,7 +195,7 @@ def verify_candidates(
         ticker = candidate["yahoo_ticker"]
         try:
             data = _download_batch(
-                [ticker], previous_session_date - timedelta(days=45), session_date + timedelta(days=2), settings
+                [ticker], previous_session_date - timedelta(days=60), session_date + timedelta(days=2), settings
             )
             row, error = _parse_ticker(ticker, _ticker_frame(data, ticker, 1), session_date, previous_session_date)
             if error or row is None:
