@@ -10,7 +10,7 @@ LOGGER = logging.getLogger(__name__)
 
 def send_naver_email(markdown: str, subject: str) -> bool:
     address = os.getenv("NAVER_EMAIL_ADDRESS")
-    password = os.getenv("NAVER_EMAIL_PASSWORD")
+    password = os.getenv("NAVER_EMAIL_APP_PASSWORD")
     recipient = os.getenv("NAVER_EMAIL_RECIPIENT") or address
     if not address or not password:
         LOGGER.warning("Naver 메일 Secret이 없어 알림을 건너뜁니다")
@@ -23,6 +23,6 @@ def send_naver_email(markdown: str, subject: str) -> bool:
     message.set_content(markdown)
 
     with smtplib.SMTP_SSL("smtp.naver.com", 465, timeout=30) as smtp:
-        smtp.login(address, password)
+        smtp.login(address.split("@", 1)[0], password)
         smtp.send_message(message)
     return True

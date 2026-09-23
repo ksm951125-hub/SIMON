@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 20
     env:
       NAVER_EMAIL_ADDRESS: ${{ secrets.NAVER_EMAIL_ADDRESS }}
-      NAVER_EMAIL_PASSWORD: ${{ secrets.NAVER_EMAIL_PASSWORD }}
+      NAVER_EMAIL_APP_PASSWORD: ${{ secrets.NAVER_EMAIL_APP_PASSWORD }}
       NAVER_EMAIL_RECIPIENT: ${{ secrets.NAVER_EMAIL_RECIPIENT }}
       PYTHONUNBUFFERED: "1"
     steps:

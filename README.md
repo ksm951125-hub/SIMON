@@ -53,12 +53,13 @@ git push -u origin main
 ## Naver 메일 설정
 
 1. Naver 메일의 **환경설정 → POP3/IMAP 설정 → POP3/SMTP 사용**을 켭니다.
-2. GitHub 저장소의 **Settings → Secrets and variables → Actions → New repository secret**에서 아래 값을 만듭니다.
+2. Naver 계정에서 **2단계 인증**을 켜고 **애플리케이션 비밀번호**를 생성합니다. 일반 로그인 비밀번호는 사용할 수 없습니다.
+3. GitHub 저장소의 **Settings → Secrets and variables → Actions → New repository secret**에서 아래 값을 만듭니다.
 
 | Secret | 값 |
 |---|---|
 | `NAVER_EMAIL_ADDRESS` | `master1256@naver.com` |
-| `NAVER_EMAIL_PASSWORD` | Naver SMTP 로그인 비밀번호 |
+| `NAVER_EMAIL_APP_PASSWORD` | Naver에서 생성한 애플리케이션 비밀번호 |
 | `NAVER_EMAIL_RECIPIENT` | `master1256@naver.com` (선택, 생략하면 발신 주소와 동일) |
 
 Secret이 없으면 모니터와 보고서 생성은 성공하고 메일 전송만 건너뜁니다. 비밀번호를 파일, 커밋, 채팅, Actions 로그에 넣지 마십시오.
@@ -79,7 +80,7 @@ GitHub의 **Actions → S&P 500 Daily Drop Monitor → Run workflow**에서 수�
 2. `Run unit tests`와 `Run monitor` 로그를 확인합니다.
 3. 구성종목 다운로드 실패 시 `data/sp500_constituents.csv` 캐시 사용 여부를 확인합니다.
 4. 가격 누락은 로그와 Markdown/JSON 보고서의 누락 목록에 표시됩니다.
-5. 메일만 오지 않으면 Naver의 POP3/SMTP 사용 설정, 두 필수 Secret 이름, 비밀번호를 확인합니다.
+5. 메일만 오지 않으면 Naver의 POP3/SMTP 사용 설정, 2단계 인증, 두 필수 Secret 이름, 애플리케이션 비밀번호를 확인합니다.
 
 ## 파일 구조
 
