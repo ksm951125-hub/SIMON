@@ -16,6 +16,10 @@ def send_gmail_email(markdown: str, subject: str) -> bool:
         LOGGER.warning("Gmail 발송 Secret이 없어 알림을 건너뜁니다")
         return False
 
+    # Google displays 16-character app passwords in four groups. Accept a
+    # pasted value with spaces/newlines and normalize it before SMTP login.
+    password = "".join(password.split())
+
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = address

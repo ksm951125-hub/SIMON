@@ -28,12 +28,12 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch):
             sent["message"] = message
 
     monkeypatch.setenv("GMAIL_ADDRESS", "sender@gmail.com")
-    monkeypatch.setenv("GMAIL_APP_PASSWORD", "secret")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "abcd efgh ijkl mnop")
     monkeypatch.setenv("ALERT_EMAIL_RECIPIENT", "recipient@naver.com")
     monkeypatch.setattr("notifier.smtplib.SMTP_SSL", FakeSMTP)
 
     assert send_gmail_email("daily report", "monitor result") is True
     assert sent["connection"] == ("smtp.gmail.com", 465, 30)
-    assert sent["login"] == ("sender@gmail.com", "secret")
+    assert sent["login"] == ("sender@gmail.com", "abcdefghijklmnop")
     assert sent["message"]["To"] == "recipient@naver.com"
     assert sent["message"].get_content().strip() == "daily report"
