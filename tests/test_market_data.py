@@ -2,7 +2,7 @@ from datetime import date
 
 import pandas as pd
 
-from market_data import _parse_ticker, download_market_data
+from market_data import _parse_spark_response, _parse_ticker, download_market_data
 from config import Settings
 
 
@@ -43,10 +43,32 @@ def test_valid_data_calculates_metrics():
 import pytest
 
 
-def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypatch, tmp_path):
+def test_parse_spark_response_maps_timestamps_to_new_york_dates():
+    payload = {
+        "spark": {
+            "result": [
+                {
+                    "symbol": "AAPL",
+                    "response": [
+                        {
+                            "timestamp": [1735851600, 1735938000],
+                            "indicators": {"quote": [{"close": [100.0, 89.0]}]},
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    parsed = _parse_spark_response(payload)
+
+    assert parsed["AAPL"][date(2025, 1, 2)] == 100.0
+    assert parsed["AAPL"][date(2025, 1, 3)] == 89.0
+
+
+def test_large_partial_spark_failure_retries_in_batches(monkeypatch, tmp_path):
     session_date = date(2025, 1, 3)
     previous_session_date = date(2025, 1, 2)
-    dates = pd.bdate_range("2024-11-25", session_date)
     tickers = [f"T{index:02d}" for index in range(30)]
     constituents = pd.DataFrame(
         {
@@ -58,18 +80,16 @@ def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypa
     )
     calls = []
 
-    def fake_download(requested, start, end, settings, *, threads=True):
-        calls.append((list(requested), threads))
-        columns = pd.MultiIndex.from_product(
-            [["Open", "Low", "Close", "Volume"], requested]
-        )
-        data = pd.DataFrame(100.0, index=dates, columns=columns)
-        data.loc[:, pd.IndexSlice["Volume", :]] = 1000.0
-        if len(calls) == 1:
-            data.loc[pd.Timestamp(previous_session_date), pd.IndexSlice["Close", :]] = float("nan")
+    def fake_download(requested, settings):
+        calls.append(list(requested))
+        returned = requested[:10] if len(calls) == 1 else requested
+        data = {
+            ticker: {previous_session_date: 100.0, session_date: 89.0}
+            for ticker in returned
+        }
         return data
 
-    monkeypatch.setattr("market_data._download_batch", fake_download)
+    monkeypatch.setattr("market_data._download_close_batch", fake_download)
     settings = Settings(
         batch_size=30,
         batch_pause_seconds=0,
@@ -85,5 +105,4 @@ def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypa
 
     assert len(prices) == 30
     assert missing == {}
-    assert calls[0][1] is False
-    assert [len(batch) for batch, threads in calls[1:] if threads is False] == [20, 10]
+    assert [len(batch) for batch in calls] == [30, 20]

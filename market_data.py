@@ -5,6 +5,7 @@ import time
 from datetime import date, timedelta
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 from config import SETTINGS, Settings
@@ -12,6 +13,14 @@ from detector import calculate_change_pct, is_drop
 from validator import validate_price_row
 
 LOGGER = logging.getLogger(__name__)
+SPARK_URL = "https://query1.finance.yahoo.com/v7/finance/spark"
+SPARK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+}
 
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
@@ -50,6 +59,66 @@ def _download_batch(
             if attempt < settings.download_retries:
                 time.sleep(2 ** (attempt - 1))
     raise RuntimeError(f"가격 batch 다운로드 실패: {last_error}")
+
+
+def _parse_spark_response(payload: dict) -> dict[str, dict[date, float]]:
+    parsed: dict[str, dict[date, float]] = {}
+    results = payload.get("spark", {}).get("result") or []
+    for item in results:
+        ticker = str(item.get("symbol", "")).upper()
+        responses = item.get("response") or []
+        if not ticker or not responses:
+            continue
+        response = responses[0]
+        timestamps = response.get("timestamp") or []
+        quote = ((response.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or response.get("close") or []
+        values: dict[date, float] = {}
+        for timestamp, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            session_day = (
+                pd.Timestamp(timestamp, unit="s", tz="UTC")
+                .tz_convert("America/New_York")
+                .date()
+            )
+            values[session_day] = float(close)
+        if values:
+            parsed[ticker] = values
+    return parsed
+
+
+def _download_close_batch(tickers: list[str], settings: Settings) -> dict[str, dict[date, float]]:
+    last_error: Exception | None = None
+    params = {
+        "symbols": ",".join(tickers),
+        "range": "3mo",
+        "interval": "1d",
+        "indicators": "close",
+        "includeTimestamps": "true",
+        "includePrePost": "false",
+        "corsDomain": "finance.yahoo.com",
+        ".tsrc": "finance",
+    }
+    for attempt in range(1, settings.download_retries + 1):
+        try:
+            response = requests.get(
+                SPARK_URL,
+                params=params,
+                headers=SPARK_HEADERS,
+                timeout=settings.download_timeout_seconds,
+            )
+            response.raise_for_status()
+            parsed = _parse_spark_response(response.json())
+            if not parsed:
+                raise ValueError("Yahoo spark 응답에 가격 데이터가 없습니다")
+            return parsed
+        except Exception as exc:
+            last_error = exc
+            LOGGER.warning("Yahoo spark batch 재시도 %d/%d: %s", attempt, settings.download_retries, exc)
+            if attempt < settings.download_retries:
+                time.sleep(2 ** (attempt - 1))
+    raise RuntimeError(f"Yahoo spark batch 다운로드 실패: {last_error}")
 
 
 def _ticker_frame(data: pd.DataFrame, ticker: str, ticker_count: int) -> pd.DataFrame:
@@ -113,36 +182,45 @@ def download_market_data(
     settings: Settings = SETTINGS,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     tickers = constituents["yahoo_ticker"].tolist()
-    # Leave ample room for 20 completed sessions even around holiday-heavy
-    # periods and occasional missing Yahoo rows.
-    start = previous_session_date - timedelta(days=60)
-    end = session_date + timedelta(days=2)
     missing: dict[str, str] = {}
     records: list[dict] = []
 
     settings.yfinance_cache_dir.mkdir(parents=True, exist_ok=True)
     yf.set_tz_cache_location(str(settings.yfinance_cache_dir))
-    # yfinance itself parallelizes each batch. Its downloader uses shared process
-    # state, so multiple simultaneous yf.download calls can contaminate results.
+    # Use Yahoo's multi-symbol close endpoint for universe-wide drop detection.
+    # Fetching full chart history for all 503 tickers triggers throttling on
+    # shared GitHub-hosted runner IPs. Full OHLCV is fetched only for candidates.
     batches = _chunks(tickers, settings.batch_size)
     for batch_index, batch in enumerate(batches, start=1):
         try:
-            data = _download_batch(batch, start, end, settings, threads=False)
+            close_data = _download_close_batch(batch, settings)
         except Exception as exc:
             for ticker in batch:
                 missing[ticker] = str(exc)
         else:
             for ticker in batch:
-                row, error = _parse_ticker(
-                    ticker,
-                    _ticker_frame(data, ticker, len(batch)),
-                    session_date,
-                    previous_session_date,
+                values = close_data.get(ticker, {})
+                previous_close = values.get(previous_session_date)
+                close = values.get(session_date)
+                if previous_close is None or close is None:
+                    missing[ticker] = (
+                        f"Yahoo spark 필수 거래일 누락 ({previous_session_date}, {session_date})"
+                    )
+                    continue
+                try:
+                    change_pct = calculate_change_pct(float(previous_close), float(close))
+                except ValueError as exc:
+                    missing[ticker] = str(exc)
+                    continue
+                records.append(
+                    {
+                        "yahoo_ticker": ticker,
+                        "session_date": session_date,
+                        "previous_close": float(previous_close),
+                        "close": float(close),
+                        "change_pct": change_pct,
+                    }
                 )
-                if error:
-                    missing[ticker] = error
-                elif row:
-                    records.append(row)
         if batch_index < len(batches) and settings.batch_pause_seconds > 0:
             LOGGER.info(
                 "Yahoo 요청 속도 제한 대기: 초기 %d/%d batch 후 %.0f초",
@@ -160,7 +238,7 @@ def download_market_data(
     # problem indistinguishable from a permanent outage.
     retry_tickers = list(missing)
     if retry_tickers:
-        retry_batch_size = min(settings.batch_size, 20)
+        retry_batch_size = settings.batch_size
         if settings.retry_cooldown_seconds > 0:
             LOGGER.info(
                 "Yahoo 재조회 전 속도 제한 cooldown: %.0f초",
@@ -175,24 +253,30 @@ def download_market_data(
         retry_batches = _chunks(retry_tickers, retry_batch_size)
         for batch_index, retry_batch in enumerate(retry_batches, start=1):
             try:
-                retry_data = _download_batch(
-                    retry_batch, start, end, settings, threads=False
-                )
+                retry_data = _download_close_batch(retry_batch, settings)
             except Exception as exc:
                 LOGGER.warning("누락 ticker 재조회 실패 (%d개): %s", len(retry_batch), exc)
                 continue
             for ticker in retry_batch:
-                row, error = _parse_ticker(
-                    ticker,
-                    _ticker_frame(retry_data, ticker, len(retry_batch)),
-                    session_date,
-                    previous_session_date,
+                values = retry_data.get(ticker, {})
+                previous_close = values.get(previous_session_date)
+                close = values.get(session_date)
+                if previous_close is None or close is None:
+                    continue
+                try:
+                    change_pct = calculate_change_pct(float(previous_close), float(close))
+                except ValueError:
+                    continue
+                records.append(
+                    {
+                        "yahoo_ticker": ticker,
+                        "session_date": session_date,
+                        "previous_close": float(previous_close),
+                        "close": float(close),
+                        "change_pct": change_pct,
+                    }
                 )
-                if error:
-                    missing[ticker] = error
-                elif row:
-                    records.append(row)
-                    missing.pop(ticker, None)
+                missing.pop(ticker, None)
             if batch_index < len(retry_batches) and settings.batch_pause_seconds > 0:
                 LOGGER.info(
                     "Yahoo 요청 속도 제한 대기: 재조회 %d/%d batch 후 %.0f초",
@@ -234,7 +318,10 @@ def verify_candidates(
             if not is_drop(row["change_pct"], settings.drop_threshold_pct):
                 rejected[ticker] = "2차 검증에서 임계치 미충족"
                 continue
-            verified.append(candidate)
+            enriched = candidate.copy()
+            for field, value in row.items():
+                enriched[field] = value
+            verified.append(enriched)
         except Exception as exc:
             rejected[ticker] = f"2차 검증 실패: {exc}"
-    return (pd.DataFrame(verified, columns=candidates.columns), rejected)
+    return (pd.DataFrame(verified), rejected)
