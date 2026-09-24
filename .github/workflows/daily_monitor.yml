@@ -2,9 +2,10 @@ name: S&P 500 Daily Drop Monitor
 
 on:
   schedule:
-    # 23:07 UTC Monday-Friday = 08:07 KST Tuesday-Saturday (KST has no DST).
+    # 03:07 UTC Tuesday-Saturday = 12:07 KST. This is at least six hours after
+    # the US regular close year-round, allowing Yahoo daily bars to settle.
     # A non-zero minute avoids GitHub Actions' documented top-of-hour peak.
-    - cron: "7 23 * * 1-5"
+    - cron: "7 3 * * 2-6"
   workflow_dispatch:
     inputs:
       session_date:

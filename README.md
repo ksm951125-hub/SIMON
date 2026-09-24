@@ -68,7 +68,7 @@ Secret이 없으면 모니터와 보고서 생성은 성공하고 메일 전송�
 
 ## GitHub Actions와 자동 실행 시간
 
-`.github/workflows/daily_monitor.yml`은 `7 23 * * 1-5`로 실행됩니다. 이는 DST와 무관하게 **한국시간 화요일~토요일 오전 08:07**입니다. KST는 DST를 사용하지 않습니다. GitHub 공식 문서상 매시 정각은 예약 실행 부하가 높아질 수 있어 7분으로 분산했으며, 이 시각도 큐 상황에 따라 더 늦어질 수 있으므로 정확한 도착 시각은 보장되지 않습니다.
+`.github/workflows/daily_monitor.yml`은 `7 3 * * 2-6`으로 실행됩니다. 이는 DST와 무관하게 **한국시간 화요일~토요일 오후 12:07**입니다. KST는 DST를 사용하지 않습니다. Yahoo의 일봉이 장 마감 직후 일부 종목에서 비어 있는 운영 사례를 반영해 정규장 종료 후 최소 6시간이 지난 세션만 처리합니다. GitHub 공식 문서상 매시 정각은 예약 실행 부하가 높아질 수 있어 7분으로 분산했으며, 이 시각도 큐 상황에 따라 더 늦어질 수 있으므로 정확한 도착 시각은 보장되지 않습니다.
 
 예약 workflow는 default branch에서만 실행됩니다. 또한 공개 저장소가 60일 동안 비활성 상태이면 GitHub가 예약 workflow를 자동 비활성화할 수 있으므로, 장기 무관리 운영에는 비공개 저장소를 권장합니다. 자세한 제한은 [GitHub의 schedule 이벤트 문서](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)를 확인하십시오.
 

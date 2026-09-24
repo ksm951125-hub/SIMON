@@ -9,6 +9,10 @@ import pandas_market_calendars as mcal
 
 KST = ZoneInfo("Asia/Seoul")
 NEW_YORK = ZoneInfo("America/New_York")
+# Yahoo's completed daily bars are not consistently available immediately at
+# the NYSE close. Production runs have returned mostly-NaN universes for the
+# just-closed session, so only select it after a conservative settlement lag.
+DATA_READY_DELAY = timedelta(hours=6)
 
 
 @dataclass(frozen=True)
@@ -52,16 +56,16 @@ def get_session_context(now: datetime | None = None) -> SessionContext:
 
     row_position = list(schedule.index.strftime("%Y-%m-%d")).index(expected_key)
     market_close = schedule.iloc[row_position]["market_close"].to_pydatetime()
-    if market_close > now_utc:
-        return SessionContext(
-            expected_date=expected,
-            session_date=None,
-            previous_session_date=None,
-            is_holiday=True,
-            reason="미국 정규장이 아직 종료되지 않음 - 분석 대상 없음",
-        )
-    if row_position == 0:
+    selected_position = row_position
+    if market_close + DATA_READY_DELAY > now_utc:
+        # The expected session is still trading or Yahoo's end-of-day bars are
+        # within their observed incomplete-data window. Process the preceding
+        # fully settled session instead of treating partial bars as final.
+        selected_position -= 1
+
+    if selected_position <= 0:
         raise RuntimeError("직전 거래일을 계산할 수 없습니다")
 
-    previous = schedule.index[row_position - 1].date()
-    return SessionContext(expected, expected, previous, False)
+    selected = schedule.index[selected_position].date()
+    previous = schedule.index[selected_position - 1].date()
+    return SessionContext(expected, selected, previous, False)
