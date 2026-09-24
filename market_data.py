@@ -296,6 +296,46 @@ def download_market_data(
     return prices.sort_values("ticker").reset_index(drop=True), missing
 
 
+def download_market_data_partition(
+    constituents: pd.DataFrame,
+    session_date: date,
+    previous_session_date: date,
+    settings: Settings = SETTINGS,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Download full Yahoo chart data for one small CI runner partition."""
+    tickers = constituents["yahoo_ticker"].tolist()
+    missing: dict[str, str] = {}
+    records: list[dict] = []
+    settings.yfinance_cache_dir.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(settings.yfinance_cache_dir))
+    try:
+        data = _download_batch(
+            tickers,
+            previous_session_date - timedelta(days=60),
+            session_date + timedelta(days=2),
+            settings,
+        )
+    except Exception as exc:
+        return pd.DataFrame(), {ticker: str(exc) for ticker in tickers}
+
+    for ticker in tickers:
+        row, error = _parse_ticker(
+            ticker,
+            _ticker_frame(data, ticker, len(tickers)),
+            session_date,
+            previous_session_date,
+        )
+        if error or row is None:
+            missing[ticker] = error or "가격 데이터 없음"
+        else:
+            records.append(row)
+    prices = pd.DataFrame(records)
+    if prices.empty:
+        return prices, missing
+    prices = prices.merge(constituents, on="yahoo_ticker", how="left", validate="one_to_one")
+    return prices.sort_values("ticker").reset_index(drop=True), missing
+
+
 def verify_candidates(
     candidates: pd.DataFrame,
     session_date: date,
