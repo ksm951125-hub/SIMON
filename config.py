@@ -12,8 +12,10 @@ class Settings:
     drop_threshold_pct: float = -10.0
     # Yahoo's spark endpoint accepts many symbols in one HTTP request. This
     # avoids the hundreds of chart requests that shared CI runner IPs throttle.
-    batch_size: int = 50
-    batch_pause_seconds: float = 2.0
+    # Send the whole S&P 500 universe in one spark request. Besides reducing
+    # CI runtime, this avoids crossing Yahoo's per-IP request threshold.
+    batch_size: int = 600
+    batch_pause_seconds: float = 0.0
     retry_cooldown_seconds: float = 10.0
     download_retries: int = 3
     download_timeout_seconds: int = 30

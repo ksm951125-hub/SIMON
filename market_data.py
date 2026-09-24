@@ -13,7 +13,10 @@ from detector import calculate_change_pct, is_drop
 from validator import validate_price_row
 
 LOGGER = logging.getLogger(__name__)
-SPARK_URL = "https://query1.finance.yahoo.com/v7/finance/spark"
+# The query1 host is aggressively throttled on GitHub-hosted runner IPs. The
+# same Yahoo spark resource is served by query2 and succeeds there even when
+# query1 returns HTTP 429 for every request.
+SPARK_URL = "https://query2.finance.yahoo.com/v7/finance/spark"
 SPARK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
