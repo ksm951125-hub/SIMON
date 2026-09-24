@@ -18,76 +18,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
-      - run: python -m pytest -q
-
-  fetch:
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
-      - name: Fetch Yahoo partition
-        shell: bash
-        run: |
-          args=(--partition-index "${{ matrix.partition }}" --partition-count 12 --output-dir partition-output)
-          if [[ -n "${{ inputs.session_date }}" ]]; then
-            args+=(--session-date "${{ inputs.session_date }}")
-          fi
-          python partition_fetch.py "${args[@]}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sp500-part-${{ matrix.partition }}
-          path: partition-output/
-          retention-days: 1
-
   monitor:
-    needs: fetch
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Yahoo throttles the shared Azure/Linux runner egress. GitHub's macOS
+    # runner pool uses separate egress and needs only one bulk spark request.
+    runs-on: macos-latest
+    timeout-minutes: 20
     env:
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       ALERT_EMAIL_RECIPIENT: ${{ secrets.ALERT_EMAIL_RECIPIENT }}
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: sp500-part-*
-          path: partitions
-          merge-multiple: true
-      - name: Aggregate, detect, and notify
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m pytest -q
+
+      - name: Run monitor
         shell: bash
         run: |
-          args=(--notify --prices-dir partitions)
+          args=(--notify)
           if [[ -n "${{ inputs.session_date }}" ]]; then
             args+=(--session-date "${{ inputs.session_date }}")
           fi
           python main.py "${args[@]}"
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

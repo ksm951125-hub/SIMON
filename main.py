@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from datetime import date, datetime
-from pathlib import Path
 
 import pandas as pd
 
@@ -26,31 +24,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="이메일 알림을 보내지 않습니다")
     parser.add_argument("--notify", action="store_true", help="Gmail Secret이 있으면 이메일 알림을 보냅니다")
     parser.add_argument("--session-date", type=date.fromisoformat, help="테스트용 미국 거래일(YYYY-MM-DD)")
-    parser.add_argument("--prices-dir", type=Path, help="분할 러너가 생성한 가격 데이터 디렉터리")
     return parser.parse_args()
-
-
-def _load_partition_results(path: Path) -> tuple[pd.DataFrame, dict[str, str]]:
-    price_files = sorted(path.rglob("part-*.csv"))
-    meta_files = sorted(path.rglob("part-*.json"))
-    if not price_files or not meta_files:
-        raise RuntimeError(f"분할 가격 데이터가 없습니다: {path}")
-    frames: list[pd.DataFrame] = []
-    for item in price_files:
-        try:
-            frame = pd.read_csv(item)
-        except pd.errors.EmptyDataError:
-            continue
-        if not frame.empty:
-            frames.append(frame)
-    prices = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    missing: dict[str, str] = {}
-    for item in meta_files:
-        payload = json.loads(item.read_text(encoding="utf-8"))
-        missing.update(payload.get("missing", {}))
-    if not prices.empty and prices["yahoo_ticker"].duplicated().any():
-        raise RuntimeError("분할 가격 데이터에 중복 ticker가 있습니다")
-    return prices, missing
 
 
 def _context_for_override(session_date: date) -> SessionContext:
@@ -87,13 +61,9 @@ def run(args: argparse.Namespace) -> int:
     LOGGER.info("구성종목 수: %d", len(constituents))
 
     LOGGER.info("[3/6] 가격 데이터 다운로드")
-    if args.prices_dir:
-        LOGGER.info("분할 GitHub 러너 결과 병합: %s", args.prices_dir)
-        prices, missing = _load_partition_results(args.prices_dir)
-    else:
-        prices, missing = download_market_data(
-            constituents, context.session_date, context.previous_session_date
-        )
+    prices, missing = download_market_data(
+        constituents, context.session_date, context.previous_session_date
+    )
     LOGGER.info("정상 수집: %d / 누락: %d", len(prices), len(missing))
     for ticker, reason in sorted(missing.items()):
         LOGGER.warning("누락 %s: %s", ticker, reason)
