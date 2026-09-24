@@ -65,13 +65,15 @@ def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypa
         )
         data = pd.DataFrame(100.0, index=dates, columns=columns)
         data.loc[:, pd.IndexSlice["Volume", :]] = 1000.0
-        if threads is not False:
+        if len(calls) == 1:
             data.loc[pd.Timestamp(previous_session_date), pd.IndexSlice["Close", :]] = float("nan")
         return data
 
     monkeypatch.setattr("market_data._download_batch", fake_download)
     settings = Settings(
         batch_size=30,
+        batch_pause_seconds=0,
+        retry_cooldown_seconds=0,
         cache_file=tmp_path / "constituents.csv",
         output_dir=tmp_path / "output",
         yfinance_cache_dir=tmp_path / "yf-cache",
@@ -83,5 +85,5 @@ def test_large_partial_failure_retries_in_small_single_threaded_batches(monkeypa
 
     assert len(prices) == 30
     assert missing == {}
-    assert calls[0][1] is True
+    assert calls[0][1] is False
     assert [len(batch) for batch, threads in calls[1:] if threads is False] == [20, 10]

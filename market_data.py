@@ -124,21 +124,33 @@ def download_market_data(
     yf.set_tz_cache_location(str(settings.yfinance_cache_dir))
     # yfinance itself parallelizes each batch. Its downloader uses shared process
     # state, so multiple simultaneous yf.download calls can contaminate results.
-    for batch in _chunks(tickers, settings.batch_size):
+    batches = _chunks(tickers, settings.batch_size)
+    for batch_index, batch in enumerate(batches, start=1):
         try:
-            data = _download_batch(batch, start, end, settings)
+            data = _download_batch(batch, start, end, settings, threads=False)
         except Exception as exc:
             for ticker in batch:
                 missing[ticker] = str(exc)
-            continue
-        for ticker in batch:
-            row, error = _parse_ticker(
-                ticker, _ticker_frame(data, ticker, len(batch)), session_date, previous_session_date
+        else:
+            for ticker in batch:
+                row, error = _parse_ticker(
+                    ticker,
+                    _ticker_frame(data, ticker, len(batch)),
+                    session_date,
+                    previous_session_date,
+                )
+                if error:
+                    missing[ticker] = error
+                elif row:
+                    records.append(row)
+        if batch_index < len(batches) and settings.batch_pause_seconds > 0:
+            LOGGER.info(
+                "Yahoo 요청 속도 제한 대기: 초기 %d/%d batch 후 %.0f초",
+                batch_index,
+                len(batches),
+                settings.batch_pause_seconds,
             )
-            if error:
-                missing[ticker] = error
-            elif row:
-                records.append(row)
+            time.sleep(settings.batch_pause_seconds)
 
     # A batch can be non-empty while Yahoo silently returns NaN rows for many
     # symbols. This happened in production with 443/503 symbols: because the
@@ -149,12 +161,19 @@ def download_market_data(
     retry_tickers = list(missing)
     if retry_tickers:
         retry_batch_size = min(settings.batch_size, 20)
+        if settings.retry_cooldown_seconds > 0:
+            LOGGER.info(
+                "Yahoo 재조회 전 속도 제한 cooldown: %.0f초",
+                settings.retry_cooldown_seconds,
+            )
+            time.sleep(settings.retry_cooldown_seconds)
         LOGGER.info(
             "누락 ticker %d개를 %d개씩 단일 스레드로 재조회합니다",
             len(retry_tickers),
             retry_batch_size,
         )
-        for retry_batch in _chunks(retry_tickers, retry_batch_size):
+        retry_batches = _chunks(retry_tickers, retry_batch_size)
+        for batch_index, retry_batch in enumerate(retry_batches, start=1):
             try:
                 retry_data = _download_batch(
                     retry_batch, start, end, settings, threads=False
@@ -174,6 +193,14 @@ def download_market_data(
                 elif row:
                     records.append(row)
                     missing.pop(ticker, None)
+            if batch_index < len(retry_batches) and settings.batch_pause_seconds > 0:
+                LOGGER.info(
+                    "Yahoo 요청 속도 제한 대기: 재조회 %d/%d batch 후 %.0f초",
+                    batch_index,
+                    len(retry_batches),
+                    settings.batch_pause_seconds,
+                )
+                time.sleep(settings.batch_pause_seconds)
 
     prices = pd.DataFrame(records)
     if prices.empty:
