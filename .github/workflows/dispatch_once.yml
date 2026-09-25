@@ -1,0 +1,26 @@
+name: Dispatch Daily Monitor Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dispatch_once.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch 2026-09-24 monitor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh api --method POST
+          repos/${GH_REPO}/actions/workflows/daily_monitor.yml/dispatches
+          -f ref=main
+          -f 'inputs[session_date]=2026-09-24'
