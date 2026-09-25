@@ -18,8 +18,8 @@ class Settings:
     batch_size: int = 20
     batch_pause_seconds: float = 1.0
     retry_cooldown_seconds: float = 10.0
-    download_retries: int = 3
-    download_timeout_seconds: int = 30
+    download_retries: int = 2
+    download_timeout_seconds: int = 15
     minimum_coverage_ratio: float = 0.95
     output_dir: Path = ROOT_DIR / "output"
     cache_file: Path = ROOT_DIR / "data" / "sp500_constituents.csv"

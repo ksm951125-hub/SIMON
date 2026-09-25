@@ -1,18 +1,54 @@
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 import requests
 
 from market_data import (
     _decode_spark_payload,
     _download_close_batch,
     _download_nasdaq_snapshot,
+    _parse_chart_response,
     _parse_nasdaq_number,
     _parse_spark_response,
     _parse_ticker,
     download_market_data,
 )
 from config import Settings
+from detector import calculate_change_pct, is_drop
+
+
+def test_mgm_historical_close_drop_regression():
+    timestamps = [
+        int(datetime(2026, 9, 23, 16, tzinfo=ZoneInfo("America/New_York")).timestamp()),
+        int(datetime(2026, 9, 24, 16, tzinfo=ZoneInfo("America/New_York")).timestamp()),
+    ]
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"exchangeTimezoneName": "America/New_York"},
+                    "timestamp": timestamps,
+                    "indicators": {
+                        "quote": [{"close": [37.85, 33.69]}],
+                        "adjclose": [{"adjclose": [37.85, 33.69]}],
+                    },
+                }
+            ],
+            "error": None,
+        }
+    }
+
+    values = _parse_chart_response(payload, "MGM")
+    previous_close = values[date(2026, 9, 23)]
+    latest_close = values[date(2026, 9, 24)]
+    change_pct = calculate_change_pct(previous_close, latest_close)
+
+    assert previous_close == pytest.approx(37.85)
+    assert latest_close == pytest.approx(33.69)
+    assert change_pct == pytest.approx(-10.990752972259)
+    assert is_drop(change_pct) is True
 
 
 def test_nasdaq_unchanged_value_is_zero():
@@ -97,9 +133,6 @@ def test_valid_data_calculates_metrics():
     assert row["average_volume_20d"] == 1000
 
 
-import pytest
-
-
 class _WrappedResponse:
     text = 'Title: Yahoo\n\nMarkdown Content:\n{"spark":{"result":[]}}\n'
 
@@ -112,11 +145,6 @@ def test_decode_spark_payload_from_reader_wrapper():
 
 
 def test_query1_429_uses_query2(monkeypatch, tmp_path):
-    payload = (
-        '{"spark":{"result":[{"symbol":"AAPL","response":[{'
-        '"timestamp":[1735851600],"indicators":{"quote":[{"close":[100.0]}]}'
-        '}]}]}}'
-    )
     calls = []
 
     class FakeResponse:
@@ -131,31 +159,24 @@ def test_query1_429_uses_query2(monkeypatch, tmp_path):
                 raise error
 
         def json(self):
-            if self.text.startswith("Title:"):
-                raise requests.exceptions.JSONDecodeError("wrapped", self.text, 0)
-            if self.text:
-                return {
-                    "spark": {
-                        "result": [
-                            {
-                                "symbol": "AAPL",
-                                "response": [
-                                    {
-                                        "timestamp": [1735851600],
-                                        "indicators": {"quote": [{"close": [100.0]}]},
-                                    }
-                                ],
-                            }
-                        ]
-                    }
+            return {
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {"exchangeTimezoneName": "America/New_York"},
+                            "timestamp": [1735851600],
+                            "indicators": {"quote": [{"close": [100.0]}]},
+                        }
+                    ],
+                    "error": None,
                 }
-            return {"spark": {"result": []}}
+            }
 
     def fake_get(url, **kwargs):
         calls.append((url, kwargs.get("params")))
         if len(calls) == 1:
             return FakeResponse(429)
-        return FakeResponse(200, payload)
+        return FakeResponse(200, "chart")
 
     monkeypatch.setattr("market_data.requests.get", fake_get)
     settings = Settings(
@@ -165,7 +186,12 @@ def test_query1_429_uses_query2(monkeypatch, tmp_path):
         yfinance_cache_dir=tmp_path / "yf-cache",
     )
 
-    result = _download_close_batch(["AAPL"], settings)
+    result = _download_close_batch(
+        ["AAPL"],
+        date(2025, 1, 1),
+        date(2025, 1, 2),
+        settings,
+    )
 
     assert result["AAPL"][date(2025, 1, 2)] == 100.0
     assert calls[0][1] is not None
@@ -197,7 +223,7 @@ def test_parse_spark_response_maps_timestamps_to_new_york_dates():
     assert parsed["AAPL"][date(2025, 1, 3)] == 89.0
 
 
-def test_large_partial_spark_failure_retries_in_batches(monkeypatch, tmp_path):
+def test_partial_chart_failure_is_reported(monkeypatch, tmp_path):
     session_date = date(2025, 1, 3)
     previous_session_date = date(2025, 1, 2)
     tickers = [f"T{index:02d}" for index in range(30)]
@@ -211,7 +237,7 @@ def test_large_partial_spark_failure_retries_in_batches(monkeypatch, tmp_path):
     )
     calls = []
 
-    def fake_download(requested, settings):
+    def fake_download(requested, previous_date, latest_date, settings):
         calls.append(list(requested))
         returned = requested[:10] if len(calls) == 1 else requested
         data = {
@@ -234,6 +260,6 @@ def test_large_partial_spark_failure_retries_in_batches(monkeypatch, tmp_path):
         constituents, session_date, previous_session_date, settings
     )
 
-    assert len(prices) == 30
-    assert missing == {}
-    assert [len(batch) for batch in calls] == [30, 20]
+    assert len(prices) == 10
+    assert len(missing) == 20
+    assert [len(batch) for batch in calls] == [30]
