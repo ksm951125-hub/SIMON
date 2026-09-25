@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -17,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 # same Yahoo spark resource is served by query2 and succeeds there even when
 # query1 returns HTTP 429 for every request.
 SPARK_URL = "https://query2.finance.yahoo.com/v7/finance/spark"
+SPARK_PROXY_URL = "https://r.jina.ai/http://query2.finance.yahoo.com/v7/finance/spark"
 SPARK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -91,6 +94,18 @@ def _parse_spark_response(payload: dict) -> dict[str, dict[date, float]]:
     return parsed
 
 
+def _decode_spark_payload(response: requests.Response) -> dict:
+    """Decode direct Yahoo JSON or the same JSON wrapped by Jina Reader."""
+    try:
+        return response.json()
+    except requests.exceptions.JSONDecodeError:
+        start = response.text.find('{"spark"')
+        if start < 0:
+            raise ValueError("Yahoo spark JSON을 응답에서 찾지 못했습니다")
+        payload, _ = json.JSONDecoder().raw_decode(response.text[start:])
+        return payload
+
+
 def _download_close_batch(tickers: list[str], settings: Settings) -> dict[str, dict[date, float]]:
     last_error: Exception | None = None
     params = {
@@ -102,25 +117,47 @@ def _download_close_batch(tickers: list[str], settings: Settings) -> dict[str, d
         "includePrePost": "false",
         "corsDomain": "finance.yahoo.com",
         ".tsrc": "finance",
+        # Keep the unauthenticated reader fallback from serving yesterday's
+        # cached response while remaining harmless to Yahoo itself.
+        "cacheBust": datetime.now(timezone.utc).strftime("%Y%m%d%H"),
     }
     for attempt in range(1, settings.download_retries + 1):
-        try:
-            response = requests.get(
-                SPARK_URL,
-                params=params,
-                headers=SPARK_HEADERS,
-                timeout=settings.download_timeout_seconds,
-            )
-            response.raise_for_status()
-            parsed = _parse_spark_response(response.json())
-            if not parsed:
-                raise ValueError("Yahoo spark 응답에 가격 데이터가 없습니다")
-            return parsed
-        except Exception as exc:
-            last_error = exc
-            LOGGER.warning("Yahoo spark batch 재시도 %d/%d: %s", attempt, settings.download_retries, exc)
-            if attempt < settings.download_retries:
-                time.sleep(2 ** (attempt - 1))
+        for source, url in (("direct", SPARK_URL), ("reader fallback", SPARK_PROXY_URL)):
+            try:
+                request_url = url
+                request_params = params
+                if source != "direct":
+                    # Reader treats its own query string separately from the
+                    # nested target URL. Encode target separators so the full
+                    # Yahoo query reaches the upstream endpoint intact.
+                    request_url = f"{url}?{urlencode(params).replace('&', '%26')}"
+                    request_params = None
+                response = requests.get(
+                    request_url,
+                    params=request_params,
+                    headers=SPARK_HEADERS,
+                    timeout=settings.download_timeout_seconds,
+                )
+                response.raise_for_status()
+                parsed = _parse_spark_response(_decode_spark_payload(response))
+                if not parsed:
+                    raise ValueError("Yahoo spark 응답에 가격 데이터가 없습니다")
+                if source != "direct":
+                    LOGGER.info("Yahoo reader fallback 사용: %d개", len(parsed))
+                return parsed
+            except Exception as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                LOGGER.warning(
+                    "Yahoo spark %s 실패 (시도 %d/%d, status=%s): %s",
+                    source,
+                    attempt,
+                    settings.download_retries,
+                    status or "n/a",
+                    type(exc).__name__,
+                )
+        if attempt < settings.download_retries:
+            time.sleep(2 ** (attempt - 1))
     raise RuntimeError(f"Yahoo spark batch 다운로드 실패: {last_error}")
 
 

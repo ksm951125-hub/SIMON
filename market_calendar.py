@@ -12,7 +12,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 # Yahoo's completed daily bars are not consistently available immediately at
 # the NYSE close. Production runs have returned mostly-NaN universes for the
 # just-closed session, so only select it after a conservative settlement lag.
-DATA_READY_DELAY = timedelta(hours=6)
+DATA_READY_DELAY = timedelta(hours=2)
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,15 @@
 from datetime import date
 
 import pandas as pd
+import requests
 
-from market_data import _parse_spark_response, _parse_ticker, download_market_data
+from market_data import (
+    _decode_spark_payload,
+    _download_close_batch,
+    _parse_spark_response,
+    _parse_ticker,
+    download_market_data,
+)
 from config import Settings
 
 
@@ -41,6 +48,63 @@ def test_valid_data_calculates_metrics():
 
 
 import pytest
+
+
+class _WrappedResponse:
+    text = 'Title: Yahoo\n\nMarkdown Content:\n{"spark":{"result":[]}}\n'
+
+    def json(self):
+        raise requests.exceptions.JSONDecodeError("not json", self.text, 0)
+
+
+def test_decode_spark_payload_from_reader_wrapper():
+    assert _decode_spark_payload(_WrappedResponse()) == {"spark": {"result": []}}
+
+
+def test_direct_429_uses_reader_fallback(monkeypatch, tmp_path):
+    payload = (
+        '{"spark":{"result":[{"symbol":"AAPL","response":[{'
+        '"timestamp":[1735851600],"indicators":{"quote":[{"close":[100.0]}]}'
+        '}]}]}}'
+    )
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.text = text
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                error = requests.HTTPError(f"status {self.status_code}")
+                error.response = self
+                raise error
+
+        def json(self):
+            if self.text.startswith("Title:"):
+                raise requests.exceptions.JSONDecodeError("wrapped", self.text, 0)
+            return {"spark": {"result": []}}
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        if len(calls) == 1:
+            return FakeResponse(429)
+        return FakeResponse(200, f"Title: Yahoo\n\nMarkdown Content:\n{payload}\n")
+
+    monkeypatch.setattr("market_data.requests.get", fake_get)
+    settings = Settings(
+        download_retries=1,
+        cache_file=tmp_path / "constituents.csv",
+        output_dir=tmp_path / "output",
+        yfinance_cache_dir=tmp_path / "yf-cache",
+    )
+
+    result = _download_close_batch(["AAPL"], settings)
+
+    assert result["AAPL"][date(2025, 1, 2)] == 100.0
+    assert calls[0][1] is not None
+    assert calls[1][1] is None
+    assert "%26range=" in calls[1][0]
 
 
 def test_parse_spark_response_maps_timestamps_to_new_york_dates():

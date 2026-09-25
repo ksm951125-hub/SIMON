@@ -2,7 +2,8 @@ name: S&P 500 Daily Drop Monitor
 
 on:
   schedule:
-    - cron: "7 3 * * 2-6"
+    # 23:00 UTC Monday-Friday = 08:00 KST Tuesday-Saturday.
+    - cron: "0 23 * * 1-5"
   workflow_dispatch:
     inputs:
       session_date:
@@ -19,9 +20,7 @@ concurrency:
 
 jobs:
   monitor:
-    # Yahoo throttles the shared Azure/Linux runner egress. GitHub's macOS
-    # runner pool uses separate egress and needs only one bulk spark request.
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
