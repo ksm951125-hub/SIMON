@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +17,8 @@ def render_markdown(
     candidates: pd.DataFrame,
     missing: dict[str, str],
     holiday_reason: str | None = None,
+    previous_session_date: date | None = None,
+    executed_at_kst: datetime | None = None,
 ) -> str:
     lines = ["# [S&P 500 급락 모니터링]", "", f"미국 거래일: {session_date.isoformat()}"]
     if holiday_reason:
@@ -26,12 +28,15 @@ def render_markdown(
         [
             f"분석 완료: {analyzed_count}개",
             f"데이터 누락: {len(missing)}개",
-            f"10% 이상 급락: {len(candidates)}개",
+            f"10% 이상 하락 종목: {len(candidates)}개",
+            f"이전 거래일: {previous_session_date.isoformat() if previous_session_date else '미확인'}",
+            "실행 시각(KST): "
+            + (executed_at_kst.strftime("%Y-%m-%d %H:%M:%S %Z") if executed_at_kst else "미확인"),
             "",
         ]
     )
     if candidates.empty:
-        lines.append("전 거래일 대비 10% 이상 하락한 S&P 500 종목 없음.")
+        lines.append("10% 이상 하락 종목 없음")
     for index, row in candidates.reset_index(drop=True).iterrows():
         lines.extend(
             [

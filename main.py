@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import date, datetime
 
@@ -42,6 +43,9 @@ def _context_for_override(session_date: date) -> SessionContext:
 
 
 def run(args: argparse.Namespace) -> int:
+    executed_at_kst = datetime.now(tz=KST)
+    is_manual_test = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    subject_prefix = "[TEST] " if is_manual_test else ""
     LOGGER.info("[1/6] US market session 확인")
     context = _context_for_override(args.session_date) if args.session_date else get_session_context()
     report_date = context.session_date or context.expected_date
@@ -51,7 +55,10 @@ def run(args: argparse.Namespace) -> int:
         LOGGER.info(context.reason)
         LOGGER.info("결과 파일: %s", ", ".join(str(path) for path in paths))
         if args.notify and not args.dry_run:
-            send_gmail_email(markdown, f"[S&P 500 급락 모니터링] {report_date.isoformat()} 휴장")
+            send_gmail_email(
+                markdown,
+                f"{subject_prefix}[S&P 500 급락 모니터] {report_date.isoformat()} 휴장",
+            )
         print(markdown)
         return 0
 
@@ -96,16 +103,26 @@ def run(args: argparse.Namespace) -> int:
         candidates["news_error"] = [item["error"] for item in news_results]
         candidates = candidates.sort_values("change_pct")
 
-    markdown = render_markdown(context.session_date, len(prices), candidates, missing)
+    markdown = render_markdown(
+        context.session_date,
+        len(prices),
+        candidates,
+        missing,
+        previous_session_date=context.previous_session_date,
+        executed_at_kst=executed_at_kst,
+    )
     paths = write_reports(
         SETTINGS.output_dir, context.session_date, len(prices), candidates, missing, markdown
     )
     LOGGER.info("[6/6] 결과 저장 및 전송")
     LOGGER.info("결과 파일: %s", ", ".join(str(path) for path in paths))
     if args.notify and not args.dry_run:
-        subject = f"[S&P 500 급락 모니터링] {context.session_date.isoformat()} - {len(candidates)}개"
-        sent = send_gmail_email(markdown, subject)
-        LOGGER.info("Gmail 전송: %s", "완료" if sent else "건너뜀")
+        if is_manual_test:
+            subject = f"[TEST] S&P 500 급락 모니터 - {executed_at_kst:%Y-%m-%d %H:%M KST}"
+        else:
+            subject = f"[S&P 500 급락 모니터] {context.session_date.isoformat()}"
+        send_gmail_email(markdown, subject)
+        LOGGER.info("Gmail 전송: 완료")
     else:
         LOGGER.info("dry-run/알림 비활성: 이메일 전송 안 함")
     print(markdown)
@@ -125,13 +142,14 @@ def main() -> int:
         LOGGER.exception("모니터 실행 실패")
         if args.notify and not args.dry_run:
             try:
-                sent = send_gmail_email(
+                failure_prefix = "[TEST] " if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" else ""
+                send_gmail_email(
                     "S&P 500 급락 모니터링 실행이 실패했습니다.\n\n"
                     f"오류: {type(exc).__name__}: {exc}\n\n"
                     "GitHub Actions 실행 로그를 확인해 주세요.\n",
-                    "[S&P 500 급락 모니터링] 실행 실패",
+                    f"{failure_prefix}[S&P 500 급락 모니터] 실행 실패",
                 )
-                LOGGER.info("실패 알림 Gmail 전송: %s", "완료" if sent else "건너뜀")
+                LOGGER.info("실패 알림 Gmail 전송: 완료")
             except Exception:
                 LOGGER.exception("실패 알림 Gmail 전송도 실패")
         return 1

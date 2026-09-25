@@ -37,3 +37,17 @@ def test_news_failure_does_not_block_report(monkeypatch):
     markdown = render_markdown(date(2025, 1, 3), 503, frame, {})
     assert "ABC Corp" in markdown
     assert "명확한 급락 원인 확인되지 않음" in markdown
+
+
+def test_zero_drop_report_is_explicit():
+    markdown = render_markdown(
+        date(2025, 1, 3),
+        503,
+        pd.DataFrame(),
+        {},
+        previous_session_date=date(2025, 1, 2),
+    )
+
+    assert "10% 이상 하락 종목: 0개" in markdown
+    assert "10% 이상 하락 종목 없음" in markdown
+    assert "이전 거래일: 2025-01-02" in markdown

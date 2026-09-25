@@ -15,11 +15,14 @@ from detector import calculate_change_pct, is_drop
 from validator import validate_price_row
 
 LOGGER = logging.getLogger(__name__)
-# The query1 host is aggressively throttled on GitHub-hosted runner IPs. The
-# same Yahoo spark resource is served by query2 and succeeds there even when
-# query1 returns HTTP 429 for every request.
-SPARK_URL = "https://query2.finance.yahoo.com/v7/finance/spark"
+# Yahoo serves the same spark resource from two hosts. GitHub-hosted runner IPs
+# can throttle either host independently, so try both before the reader proxy.
+SPARK_URLS = (
+    ("query1", "https://query1.finance.yahoo.com/v7/finance/spark"),
+    ("query2", "https://query2.finance.yahoo.com/v7/finance/spark"),
+)
 SPARK_PROXY_URL = "https://r.jina.ai/http://query2.finance.yahoo.com/v7/finance/spark"
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
 SPARK_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -27,10 +30,79 @@ SPARK_HEADERS = {
     ),
     "Accept": "application/json,text/plain,*/*",
 }
+NASDAQ_HEADERS = {
+    **SPARK_HEADERS,
+    "Origin": "https://www.nasdaq.com",
+    "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+}
 
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _nasdaq_symbol(symbol: str) -> str:
+    return symbol.strip().upper().replace(".", "-").replace("/", "-")
+
+
+def _parse_nasdaq_number(value: object) -> float:
+    text = str(value).strip().replace("$", "").replace(",", "").replace("%", "")
+    if text.upper() == "UNCH":
+        return 0.0
+    if not text or text == "--":
+        raise ValueError("Nasdaq 가격 값 누락")
+    return float(text)
+
+
+def _download_nasdaq_snapshot(
+    constituents: pd.DataFrame,
+    session_date: date,
+    settings: Settings,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Download the latest completed regular-session snapshot in one request."""
+    response = requests.get(
+        NASDAQ_SCREENER_URL,
+        params={"tableonly": "true", "limit": "10000"},
+        headers=NASDAQ_HEADERS,
+        timeout=settings.download_timeout_seconds,
+    )
+    response.raise_for_status()
+    rows = (((response.json().get("data") or {}).get("table") or {}).get("rows") or [])
+    if not rows:
+        raise ValueError("Nasdaq screener 응답에 종목 데이터가 없습니다")
+
+    by_symbol = {_nasdaq_symbol(row.get("symbol", "")): row for row in rows}
+    records: list[dict] = []
+    missing: dict[str, str] = {}
+    for _, constituent in constituents.iterrows():
+        yahoo_ticker = constituent["yahoo_ticker"]
+        row = by_symbol.get(_nasdaq_symbol(yahoo_ticker))
+        if row is None:
+            missing[yahoo_ticker] = "Nasdaq screener 종목 누락"
+            continue
+        try:
+            close = _parse_nasdaq_number(row.get("lastsale"))
+            net_change = _parse_nasdaq_number(row.get("netchange"))
+            previous_close = close - net_change
+            change_pct = calculate_change_pct(previous_close, close)
+        except (TypeError, ValueError) as exc:
+            missing[yahoo_ticker] = str(exc)
+            continue
+        records.append(
+            {
+                "yahoo_ticker": yahoo_ticker,
+                "session_date": session_date,
+                "previous_close": previous_close,
+                "close": close,
+                "change_pct": change_pct,
+            }
+        )
+
+    prices = pd.DataFrame(records)
+    if prices.empty:
+        return prices, missing
+    prices = prices.merge(constituents, on="yahoo_ticker", how="left", validate="one_to_one")
+    return prices.sort_values("ticker").reset_index(drop=True), missing
 
 
 def _download_batch(
@@ -122,11 +194,12 @@ def _download_close_batch(tickers: list[str], settings: Settings) -> dict[str, d
         "cacheBust": datetime.now(timezone.utc).strftime("%Y%m%d%H"),
     }
     for attempt in range(1, settings.download_retries + 1):
-        for source, url in (("direct", SPARK_URL), ("reader fallback", SPARK_PROXY_URL)):
+        sources = (*SPARK_URLS, ("reader fallback", SPARK_PROXY_URL))
+        for source, url in sources:
             try:
                 request_url = url
                 request_params = params
-                if source != "direct":
+                if source == "reader fallback":
                     # Reader treats its own query string separately from the
                     # nested target URL. Encode target separators so the full
                     # Yahoo query reaches the upstream endpoint intact.
@@ -142,8 +215,10 @@ def _download_close_batch(tickers: list[str], settings: Settings) -> dict[str, d
                 parsed = _parse_spark_response(_decode_spark_payload(response))
                 if not parsed:
                     raise ValueError("Yahoo spark 응답에 가격 데이터가 없습니다")
-                if source != "direct":
+                if source == "reader fallback":
                     LOGGER.info("Yahoo reader fallback 사용: %d개", len(parsed))
+                else:
+                    LOGGER.info("Yahoo %s spark 사용: %d개", source, len(parsed))
                 return parsed
             except Exception as exc:
                 last_error = exc
@@ -221,6 +296,27 @@ def download_market_data(
     previous_session_date: date,
     settings: Settings = SETTINGS,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
+    try:
+        nasdaq_prices, nasdaq_missing = _download_nasdaq_snapshot(
+            constituents, session_date, settings
+        )
+        nasdaq_coverage = len(nasdaq_prices) / len(constituents)
+        if nasdaq_coverage >= settings.minimum_coverage_ratio:
+            LOGGER.info(
+                "Nasdaq screener 시세 수집: %d/%d (%.1f%%)",
+                len(nasdaq_prices),
+                len(constituents),
+                nasdaq_coverage * 100,
+            )
+            return nasdaq_prices, nasdaq_missing
+        LOGGER.warning(
+            "Nasdaq screener 커버리지 부족: %d/%d; Yahoo fallback 사용",
+            len(nasdaq_prices),
+            len(constituents),
+        )
+    except Exception as exc:
+        LOGGER.warning("Nasdaq screener 시세 수집 실패; Yahoo fallback 사용: %s", exc)
+
     tickers = constituents["yahoo_ticker"].tolist()
     missing: dict[str, str] = {}
     records: list[dict] = []
