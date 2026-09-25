@@ -1,3 +1,6 @@
+import logging
+import smtplib
+
 import pytest
 
 from notifier import send_gmail_email
@@ -11,7 +14,8 @@ def test_missing_gmail_secrets_skips_email(monkeypatch):
         send_gmail_email("report", "subject")
 
 
-def test_gmail_email_uses_ssl_smtp(monkeypatch):
+def test_gmail_email_uses_ssl_smtp(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
     sent = {}
 
     class FakeSMTP:
@@ -30,6 +34,7 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch):
         def send_message(self, message, from_addr=None, to_addrs=None):
             sent["message"] = message
             sent["envelope"] = (from_addr, to_addrs)
+            return {}
 
     monkeypatch.setenv("GMAIL_ADDRESS", "sender@gmail.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "abcd efgh ijkl mnop")
@@ -42,3 +47,32 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch):
     assert sent["message"]["To"] == "recipient@naver.com"
     assert sent["message"].get_content().strip() == "daily report"
     assert sent["envelope"] == ("sender@gmail.com", ["recipient@naver.com"])
+    assert "Gmail SMTP SSL connection established" in caplog.text
+    assert "Gmail SMTP authentication succeeded" in caplog.text
+    assert "Gmail SMTP server accepted the message for all 1 recipient(s)" in caplog.text
+
+
+def test_gmail_email_raises_when_smtp_refuses_a_recipient(monkeypatch):
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def login(self, address, password):
+            pass
+
+        def send_message(self, message, from_addr=None, to_addrs=None):
+            return {"recipient@example.com": (550, b"rejected")}
+
+    monkeypatch.setenv("GMAIL_ADDRESS", "sender@gmail.com")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "abcdefghijklmnop")
+    monkeypatch.setenv("ALERT_EMAIL_RECIPIENT", "recipient@example.com")
+    monkeypatch.setattr("notifier.smtplib.SMTP_SSL", FakeSMTP)
+
+    with pytest.raises(smtplib.SMTPRecipientsRefused, match="recipient@example.com"):
+        send_gmail_email("daily report", "monitor result")

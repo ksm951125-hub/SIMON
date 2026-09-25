@@ -35,6 +35,13 @@ def send_gmail_email(markdown: str, subject: str) -> None:
     message.set_content(markdown)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+        LOGGER.info("Gmail SMTP SSL connection established")
         smtp.login(address, password)
-        smtp.send_message(message, from_addr=address, to_addrs=recipients)
-    LOGGER.info("Gmail SMTP 서버가 %d개 수신 주소에 메일을 수락했습니다", len(recipients))
+        LOGGER.info("Gmail SMTP authentication succeeded")
+        refused = smtp.send_message(message, from_addr=address, to_addrs=recipients)
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
+        LOGGER.info(
+            "Gmail SMTP server accepted the message for all %d recipient(s)",
+            len(recipients),
+        )
