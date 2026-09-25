@@ -99,3 +99,18 @@ notifier.py             Gmail SMTP 메일 알림
 tests/                  단위 테스트
 .github/workflows/      자동 실행 설정
 ```
+# US + KOSPI 급락 모니터 운영 기준
+
+- S&P 500: 최근 완료 거래일 종가가 직전 거래일보다 `-10.0%` 이하인 종목
+- KOSPI: 유가증권시장 주식(보통주·우선주, ETF/ETN/ELW 제외) 중 `-7.0%` 이하인 종목
+- 실행: GitHub Actions에서 `23:00 UTC`(한국시간 오전 08:00, 월~금 UTC) 자동 실행
+- 미국 데이터: Yahoo Finance 날짜 지정 daily chart의 정규장 `quote.close`
+- 한국 데이터: Naver 증권 KOSPI 상품 목록과 날짜 지정 일별 정규장 `closePrice`
+- `OK`, `PARTIAL`, `DATA_INCOMPLETE`, `FAILED`로 시장별 데이터 상태를 구분하며, 데이터 부족은 정상 0건으로 표시하지 않습니다.
+
+수동 실행은 GitHub Actions의 **US + KOSPI Daily Drop Monitor**에서 실행합니다. `session_date_us`, `session_date_kr`를 비우면 시장별 최근 완료 거래일을 자동 선택합니다. 날짜를 입력하면 해당 거래일을 재현하며, `send_email=false`는 dry-run, `send_email=true`는 통합 Gmail을 실제 발송합니다.
+
+```powershell
+pytest -q
+python main.py --dry-run --session-date-us 2026-09-24 --session-date-kr 2026-06-05
+```

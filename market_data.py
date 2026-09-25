@@ -418,7 +418,12 @@ def verify_candidates(
     previous_session_date: date,
     settings: Settings = SETTINGS,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Re-download only candidates and require agreement within 0.15 percentage point."""
+    """Re-download candidates when possible and reject only verified disagreements.
+
+    The primary candidate already comes from dated daily-close data. A transient
+    outage in the optional yfinance cross-check must not turn a real drop into a
+    false negative.
+    """
     verified: list[pd.Series] = []
     rejected: dict[str, str] = {}
     for _, candidate in candidates.iterrows():
@@ -429,7 +434,10 @@ def verify_candidates(
             )
             row, error = _parse_ticker(ticker, _ticker_frame(data, ticker, 1), session_date, previous_session_date)
             if error or row is None:
-                rejected[ticker] = error or "2차 검증 데이터 없음"
+                fallback = candidate.copy()
+                fallback["verification_status"] = "primary_daily_close_only"
+                verified.append(fallback)
+                LOGGER.warning("%s 2차 검증 데이터 없음; 1차 일별 종가 결과 유지: %s", ticker, error)
                 continue
             if abs(row["change_pct"] - float(candidate["change_pct"])) > 0.15:
                 rejected[ticker] = "1차/2차 등락률 불일치"
@@ -442,5 +450,8 @@ def verify_candidates(
                 enriched[field] = value
             verified.append(enriched)
         except Exception as exc:
-            rejected[ticker] = f"2차 검증 실패: {exc}"
+            fallback = candidate.copy()
+            fallback["verification_status"] = "primary_daily_close_only"
+            verified.append(fallback)
+            LOGGER.warning("%s 2차 검증 실패; 1차 일별 종가 결과 유지: %s", ticker, exc)
     return (pd.DataFrame(verified), rejected)

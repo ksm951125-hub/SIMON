@@ -44,28 +44,25 @@ def get_session_context(now: datetime | None = None) -> SessionContext:
         end_date=expected,
     )
 
+    keys = list(schedule.index.strftime("%Y-%m-%d"))
     expected_key = str(expected)
-    if expected_key not in schedule.index.strftime("%Y-%m-%d"):
-        return SessionContext(
-            expected_date=expected,
-            session_date=None,
-            previous_session_date=None,
-            is_holiday=True,
-            reason="미국 증시 휴장 - 분석 대상 없음",
-        )
-
-    row_position = list(schedule.index.strftime("%Y-%m-%d")).index(expected_key)
-    market_close = schedule.iloc[row_position]["market_close"].to_pydatetime()
-    selected_position = row_position
-    if market_close + DATA_READY_DELAY > now_utc:
-        # The expected session is still trading or Yahoo's end-of-day bars are
-        # within their observed incomplete-data window. Process the preceding
-        # fully settled session instead of treating partial bars as final.
-        selected_position -= 1
+    if expected_key in keys:
+        row_position = keys.index(expected_key)
+        market_close = schedule.iloc[row_position]["market_close"].to_pydatetime()
+        selected_position = row_position
+        if market_close + DATA_READY_DELAY > now_utc:
+            # The expected session is still trading or its daily bar is still
+            # within the observed incomplete-data window.
+            selected_position -= 1
+    else:
+        # Weekends and US-only holidays still analyze the most recent two
+        # completed sessions rather than suppressing the US section.
+        selected_position = len(schedule) - 1
 
     if selected_position <= 0:
         raise RuntimeError("직전 거래일을 계산할 수 없습니다")
 
     selected = schedule.index[selected_position].date()
     previous = schedule.index[selected_position - 1].date()
-    return SessionContext(expected, selected, previous, False)
+    reason = None if selected == expected else f"최근 완료 거래일 {selected} 분석"
+    return SessionContext(expected, selected, previous, False, reason)

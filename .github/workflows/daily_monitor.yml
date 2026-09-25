@@ -1,4 +1,4 @@
-name: S&P 500 Daily Drop Monitor
+name: US + KOSPI Daily Drop Monitor
 
 on:
   schedule:
@@ -6,10 +6,19 @@ on:
     - cron: "0 23 * * 1-5"
   workflow_dispatch:
     inputs:
-      session_date:
+      session_date_us:
         description: "Optional US session date (YYYY-MM-DD)"
         required: false
         type: string
+      session_date_kr:
+        description: "Optional KOSPI session date (YYYY-MM-DD)"
+        required: false
+        type: string
+      send_email:
+        description: "Send the combined Gmail notification"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,9 +55,17 @@ jobs:
       - name: Run monitor
         shell: bash
         run: |
-          args=(--notify)
-          if [[ -n "${{ inputs.session_date }}" ]]; then
-            args+=(--session-date "${{ inputs.session_date }}")
+          args=()
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${{ inputs.send_email }}" == "true" ]]; then
+            args+=(--notify)
+          else
+            args+=(--dry-run)
+          fi
+          if [[ -n "${{ inputs.session_date_us }}" ]]; then
+            args+=(--session-date-us "${{ inputs.session_date_us }}")
+          fi
+          if [[ -n "${{ inputs.session_date_kr }}" ]]; then
+            args+=(--session-date-kr "${{ inputs.session_date_kr }}")
           fi
           python main.py "${args[@]}"
 
@@ -56,7 +73,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sp500-drop-report-${{ github.run_id }}
+          name: us-kospi-drop-report-${{ github.run_id }}
           path: output/
           if-no-files-found: warn
           retention-days: 90

@@ -6,9 +6,89 @@ from pathlib import Path
 
 import pandas as pd
 
+from market_result import MarketResult
+
 
 def _money(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def _market_price(value: float, currency: str) -> str:
+    if currency == "KRW":
+        return f"KRW {value:,.0f}"
+    return f"${value:,.2f}"
+
+
+def render_combined_markdown(
+    us: MarketResult,
+    kr: MarketResult,
+    executed_at_kst: datetime,
+) -> str:
+    lines = [
+        "# US + KOSPI 급락 모니터",
+        "",
+        f"실행 시각(KST): {executed_at_kst:%Y-%m-%d %H:%M:%S %Z}",
+        "",
+    ]
+    for result in (us, kr):
+        lines.extend(
+            [
+                "=" * 64,
+                f"## {result.title}",
+                f"기준: {result.threshold_pct:.1f}% 이하",
+                "",
+                f"상태: {result.status}",
+                f"분석일: {result.session_date.isoformat() if result.session_date else '확인 불가'}",
+                f"이전 거래일: {result.previous_session_date.isoformat() if result.previous_session_date else '확인 불가'}",
+                f"수집: {result.analyzed_count} / {result.total_count}",
+                f"Coverage: {result.coverage:.1%}",
+            ]
+        )
+        if result.status in {"DATA_INCOMPLETE", "FAILED"}:
+            lines.append("탐지: 확인 필요 (데이터 불완전)")
+        else:
+            lines.append(f"탐지: {len(result.candidates)}개")
+        if result.error:
+            lines.append(f"오류: {result.error}")
+        lines.append("")
+
+        if not result.candidates.empty:
+            code_label = "Ticker" if result.market == "US" else "Code"
+            lines.extend(
+                [
+                    f"| {code_label} | Company | Prev Close | Close | Change |",
+                    "|---|---|---:|---:|---:|",
+                ]
+            )
+            for _, row in result.candidates.iterrows():
+                lines.append(
+                    f"| {row[result.code_column]} | {row['company_name']} | "
+                    f"{_market_price(row['previous_close'], result.currency)} | "
+                    f"{_market_price(row['close'], result.currency)} | "
+                    f"{row['change_pct']:+.2f}% |"
+                )
+        elif result.status not in {"DATA_INCOMPLETE", "FAILED"}:
+            lines.append("기준 이하 급락 종목 없음")
+
+        if result.missing:
+            lines.extend(["", "데이터 누락:"])
+            lines.extend(f"- {code}: {reason}" for code, reason in sorted(result.missing.items()))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_combined_subject(us: MarketResult, kr: MarketResult, test_prefix: str = "") -> str:
+    warning = "[DATA WARNING]" if us.has_data_warning or kr.has_data_warning else ""
+
+    def count_text(result: MarketResult) -> str:
+        if result.status in {"DATA_INCOMPLETE", "FAILED"}:
+            return "확인필요"
+        return f"{len(result.candidates)}개"
+
+    return (
+        f"{test_prefix}[급락 모니터]{warning} "
+        f"S&P500 {count_text(us)} / KOSPI {count_text(kr)}"
+    )
 
 
 def render_markdown(

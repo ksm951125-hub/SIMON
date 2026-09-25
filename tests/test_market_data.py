@@ -14,6 +14,7 @@ from market_data import (
     _parse_spark_response,
     _parse_ticker,
     download_market_data,
+    verify_candidates,
 )
 from config import Settings
 from detector import calculate_change_pct, is_drop
@@ -49,6 +50,37 @@ def test_mgm_historical_close_drop_regression():
     assert latest_close == pytest.approx(33.69)
     assert change_pct == pytest.approx(-10.990752972259)
     assert is_drop(change_pct) is True
+
+
+def test_candidate_survives_secondary_verification_outage(monkeypatch, tmp_path):
+    candidate = pd.DataFrame(
+        [{
+            "ticker": "MGM",
+            "yahoo_ticker": "MGM",
+            "company_name": "MGM Resorts International",
+            "previous_close": 37.85,
+            "close": 33.69,
+            "change_pct": calculate_change_pct(37.85, 33.69),
+        }]
+    )
+
+    def fail_download(*args, **kwargs):
+        raise RuntimeError("secondary provider unavailable")
+
+    monkeypatch.setattr("market_data._download_batch", fail_download)
+    settings = Settings(
+        cache_file=tmp_path / "constituents.csv",
+        output_dir=tmp_path / "output",
+        yfinance_cache_dir=tmp_path / "yf-cache",
+    )
+
+    verified, rejected = verify_candidates(
+        candidate, date(2026, 9, 24), date(2026, 9, 23), settings
+    )
+
+    assert rejected == {}
+    assert verified.iloc[0]["ticker"] == "MGM"
+    assert verified.iloc[0]["verification_status"] == "primary_daily_close_only"
 
 
 def test_nasdaq_unchanged_value_is_zero():
