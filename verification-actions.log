@@ -1,0 +1,27 @@
+monitor	Run monitor	2026-09-25T08:24:09.4488132Z 2026-09-25 08:24:09 INFO sp500_monitor - [1/6] US market session 확인
+monitor	Run monitor	2026-09-25T08:24:09.6293295Z 2026-09-25 08:24:09 INFO sp500_monitor - 기준 거래일 2026-09-24 / 직전 거래일 2026-09-23
+monitor	Run monitor	2026-09-25T08:24:09.6294421Z 2026-09-25 08:24:09 INFO sp500_monitor - [2/6] S&P 500 constituents 로딩
+monitor	Run monitor	2026-09-25T08:24:10.0487959Z 2026-09-25 08:24:10 INFO sp500_monitor - 구성종목 수: 503
+monitor	Run monitor	2026-09-25T08:24:10.0488553Z 2026-09-25 08:24:10 INFO sp500_monitor - [3/6] 가격 데이터 다운로드
+monitor	Run monitor	2026-09-25T08:24:50.1336528Z 2026-09-25 08:24:50 INFO sp500_monitor - 정상 수집: 502 / 누락: 1
+monitor	Run monitor	2026-09-25T08:24:50.1338412Z 2026-09-25 08:24:50 INFO sp500_monitor - [4/6] 데이터 검증
+monitor	Run monitor	2026-09-25T08:24:51.1943129Z 2026-09-25 08:24:51 INFO sp500_monitor - [5/6] -10% 종목 탐지: 3개
+monitor	Run monitor	2026-09-25T08:24:51.5610522Z 2026-09-25 08:24:51 INFO sp500_monitor - [6/6] 결과 저장 및 전송
+monitor	Run monitor	2026-09-25T08:24:51.5612840Z 2026-09-25 08:24:51 INFO sp500_monitor - 결과 파일: /home/runner/work/SIMON/SIMON/output/2026-09-24.csv, /home/runner/work/SIMON/SIMON/output/2026-09-24.json, /home/runner/work/SIMON/SIMON/output/2026-09-24.md
+monitor	Run monitor	2026-09-25T08:24:51.7299066Z 2026-09-25 08:24:51 INFO notifier - Gmail SMTP SSL connection established
+monitor	Run monitor	2026-09-25T08:24:52.4766659Z 2026-09-25 08:24:52 INFO notifier - Gmail SMTP authentication succeeded
+monitor	Run monitor	2026-09-25T08:24:53.4173065Z 2026-09-25 08:24:53 INFO notifier - Gmail SMTP server accepted the message for all 1 recipient(s)
+monitor	Run monitor	2026-09-25T08:24:53.4565298Z 2026-09-25 08:24:53 INFO sp500_monitor - Gmail 전송: 완료
+monitor	Run monitor	2026-09-25T08:24:53.4595959Z Previous Close: $26.23
+monitor	Run monitor	2026-09-25T08:24:53.4596344Z Close: $23.07
+monitor	Run monitor	2026-09-25T08:24:53.4596696Z Change: -12.05%
+monitor	Run monitor	2026-09-25T08:24:53.4598598Z Open → Close: -12.35%
+monitor	Run monitor	2026-09-25T08:24:53.4599988Z ## 2. MGM Resorts (MGM)
+monitor	Run monitor	2026-09-25T08:24:53.4600539Z Previous Close: $37.85
+monitor	Run monitor	2026-09-25T08:24:53.4600765Z Close: $33.69
+monitor	Run monitor	2026-09-25T08:24:53.4600967Z Change: -10.99%
+monitor	Run monitor	2026-09-25T08:24:53.4602136Z Open → Close: -0.53%
+monitor	Run monitor	2026-09-25T08:24:53.4603991Z Previous Close: $191.97
+monitor	Run monitor	2026-09-25T08:24:53.4604226Z Close: $172.16
+monitor	Run monitor	2026-09-25T08:24:53.4604638Z Change: -10.32%
+monitor	Run monitor	2026-09-25T08:24:53.4605804Z Open → Close: -9.39%
