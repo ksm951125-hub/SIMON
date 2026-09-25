@@ -1,4 +1,4 @@
-name: Dispatch Daily Monitor Once
+name: Collect Verification Log Once
 
 on:
   push:
@@ -7,20 +7,33 @@ on:
       - .github/workflows/dispatch_once.yml
 
 permissions:
-  actions: write
-  contents: read
+  actions: read
+  contents: write
 
 jobs:
-  dispatch:
+  collect:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Dispatch 2026-09-24 monitor
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect sanitized verification lines
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: >-
-          gh api --method POST
-          repos/${GH_REPO}/actions/workflows/daily_monitor.yml/dispatches
-          -f ref=main
-          -f 'inputs[session_date]=2026-09-24'
+        shell: bash
+        run: |
+          timeout 15s gh run view 36112676496 --log \
+            | grep -E 'INFO (sp500_monitor|notifier)|MGM Resorts|Previous Close:|Close:|Change:' \
+            > verification-actions.log
+          test -s verification-actions.log
+
+      - name: Commit verification evidence
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add verification-actions.log
+          git commit -m "Record dated monitor verification"
+          git push
