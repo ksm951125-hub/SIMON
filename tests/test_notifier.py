@@ -19,7 +19,8 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch, caplog):
     sent = {}
 
     class FakeSMTP:
-        def __init__(self, host, port, timeout):
+        def __init__(self, host, port, timeout, context):
+            assert context.check_hostname
             sent["connection"] = (host, port, timeout)
 
         def __enter__(self):
@@ -41,11 +42,17 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch, caplog):
     monkeypatch.setenv("ALERT_EMAIL_RECIPIENT", "recipient@naver.com")
     monkeypatch.setattr("notifier.smtplib.SMTP_SSL", FakeSMTP)
 
-    assert send_gmail_email("daily report", "monitor result") is None
+    assert send_gmail_email("daily report", "monitor result", "<p>일일 리포트</p>") is None
     assert sent["connection"] == ("smtp.gmail.com", 465, 30)
     assert sent["login"] == ("sender@gmail.com", "abcdefghijklmnop")
     assert sent["message"]["To"] == "recipient@naver.com"
-    assert sent["message"].get_content().strip() == "daily report"
+    assert sent["message"].get_content_type() == "multipart/alternative"
+    assert [part.get_content_type() for part in sent["message"].iter_parts()] == [
+        "text/plain",
+        "text/html",
+    ]
+    assert sent["message"].get_body(preferencelist=("plain",)).get_content().strip() == "daily report"
+    assert "일일 리포트" in sent["message"].get_body(preferencelist=("html",)).get_content()
     assert sent["envelope"] == ("sender@gmail.com", ["recipient@naver.com"])
     assert "Gmail SMTP SSL connection established" in caplog.text
     assert "Gmail SMTP authentication succeeded" in caplog.text
@@ -54,7 +61,7 @@ def test_gmail_email_uses_ssl_smtp(monkeypatch, caplog):
 
 def test_gmail_email_raises_when_smtp_refuses_a_recipient(monkeypatch):
     class FakeSMTP:
-        def __init__(self, host, port, timeout):
+        def __init__(self, host, port, timeout, context):
             pass
 
         def __enter__(self):

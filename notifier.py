@@ -3,13 +3,18 @@ from __future__ import annotations
 import logging
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
 from email.utils import getaddresses
 
 LOGGER = logging.getLogger(__name__)
 
 
-def send_gmail_email(markdown: str, subject: str) -> None:
+class NotificationError(RuntimeError):
+    pass
+
+
+def send_gmail_email(plain_text: str, subject: str, html: str | None = None) -> None:
     address = os.getenv("GMAIL_ADDRESS")
     password = os.getenv("GMAIL_APP_PASSWORD")
     recipient = os.getenv("ALERT_EMAIL_RECIPIENT")
@@ -32,9 +37,11 @@ def send_gmail_email(markdown: str, subject: str) -> None:
     message["Subject"] = subject
     message["From"] = address
     message["To"] = ", ".join(recipients)
-    message.set_content(markdown)
+    message.set_content(plain_text)
+    if html is not None:
+        message.add_alternative(html, subtype="html")
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=ssl.create_default_context()) as smtp:
         LOGGER.info("Gmail SMTP SSL connection established")
         smtp.login(address, password)
         LOGGER.info("Gmail SMTP authentication succeeded")

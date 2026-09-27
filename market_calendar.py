@@ -27,9 +27,8 @@ class SessionContext:
 def get_session_context(now: datetime | None = None) -> SessionContext:
     """Return the US session expected at this KST run and its predecessor.
 
-    At 08:00 KST, New York is still on the previous calendar date. A run whose
-    New York calendar date is not an NYSE session is intentionally reported as
-    a holiday instead of silently re-processing an older session.
+    At 08:00 KST, New York is still on the previous calendar date.
+    Holidays use the latest two completed sessions; dates remain explicit.
     """
     if now is None:
         now = datetime.now(tz=KST)

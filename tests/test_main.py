@@ -66,10 +66,18 @@ def test_market_failures_are_isolated_in_combined_report(monkeypatch, failed_mar
         (lambda *_: (_ for _ in ()).throw(RuntimeError("KR outage")))
         if failed_market == "KR" else (lambda *_: ok_kr),
     )
+    monkeypatch.setattr(main, "execute_market", lambda function, argument: function(argument))
     captured = {}
-    monkeypatch.setattr(main, "_write_outputs", lambda us, kr, markdown, executed: captured.setdefault("markdown", markdown))
+    monkeypatch.setattr(
+        main,
+        "_write_outputs",
+        lambda us, kr, plain_text, html, executed: captured.update(
+            plain_text=plain_text, html=html
+        ),
+    )
 
     assert main.run(args) == 1
-    assert f"{failed_market} outage" in captured["markdown"]
-    assert "상태: OK" in captured["markdown"]
-    assert "상태: FAILED" in captured["markdown"]
+    assert f"{failed_market} outage" in captured["plain_text"]
+    assert "상태: OK" in captured["plain_text"]
+    assert "상태: FAILED" in captured["plain_text"]
+    assert f"{failed_market} outage" in captured["html"]

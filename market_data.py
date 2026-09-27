@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -17,102 +15,19 @@ from detector import calculate_change_pct, is_drop
 from validator import validate_price_row
 
 LOGGER = logging.getLogger(__name__)
-# Yahoo serves the same spark resource from two hosts. GitHub-hosted runner IPs
-# can throttle either host independently, so try both before the reader proxy.
-SPARK_URLS = (
-    ("query1", "https://query1.finance.yahoo.com/v7/finance/spark"),
-    ("query2", "https://query2.finance.yahoo.com/v7/finance/spark"),
-)
-SPARK_PROXY_URL = "https://r.jina.ai/http://query2.finance.yahoo.com/v7/finance/spark"
+# Dated regular-session history only. Never use undated screener snapshots.
 CHART_URLS = (
     ("query1", "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"),
     ("query2", "https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"),
 )
-NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
-SPARK_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json,text/plain,*/*",
-}
 CHART_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
-}
-NASDAQ_HEADERS = {
-    **SPARK_HEADERS,
-    "Origin": "https://www.nasdaq.com",
-    "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
 }
 
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
-
-
-def _nasdaq_symbol(symbol: str) -> str:
-    return symbol.strip().upper().replace(".", "-").replace("/", "-")
-
-
-def _parse_nasdaq_number(value: object) -> float:
-    text = str(value).strip().replace("$", "").replace(",", "").replace("%", "")
-    if text.upper() == "UNCH":
-        return 0.0
-    if not text or text == "--":
-        raise ValueError("Nasdaq 가격 값 누락")
-    return float(text)
-
-
-def _download_nasdaq_snapshot(
-    constituents: pd.DataFrame,
-    session_date: date,
-    settings: Settings,
-) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Download the latest completed regular-session snapshot in one request."""
-    response = requests.get(
-        NASDAQ_SCREENER_URL,
-        params={"tableonly": "true", "limit": "10000"},
-        headers=NASDAQ_HEADERS,
-        timeout=settings.download_timeout_seconds,
-    )
-    response.raise_for_status()
-    rows = (((response.json().get("data") or {}).get("table") or {}).get("rows") or [])
-    if not rows:
-        raise ValueError("Nasdaq screener 응답에 종목 데이터가 없습니다")
-
-    by_symbol = {_nasdaq_symbol(row.get("symbol", "")): row for row in rows}
-    records: list[dict] = []
-    missing: dict[str, str] = {}
-    for _, constituent in constituents.iterrows():
-        yahoo_ticker = constituent["yahoo_ticker"]
-        row = by_symbol.get(_nasdaq_symbol(yahoo_ticker))
-        if row is None:
-            missing[yahoo_ticker] = "Nasdaq screener 종목 누락"
-            continue
-        try:
-            close = _parse_nasdaq_number(row.get("lastsale"))
-            net_change = _parse_nasdaq_number(row.get("netchange"))
-            previous_close = close - net_change
-            change_pct = calculate_change_pct(previous_close, close)
-        except (TypeError, ValueError) as exc:
-            missing[yahoo_ticker] = str(exc)
-            continue
-        records.append(
-            {
-                "yahoo_ticker": yahoo_ticker,
-                "session_date": session_date,
-                "previous_close": previous_close,
-                "close": close,
-                "change_pct": change_pct,
-            }
-        )
-
-    prices = pd.DataFrame(records)
-    if prices.empty:
-        return prices, missing
-    prices = prices.merge(constituents, on="yahoo_ticker", how="left", validate="one_to_one")
-    return prices.sort_values("ticker").reset_index(drop=True), missing
 
 
 def _download_batch(
@@ -131,7 +46,8 @@ def _download_batch(
                 start=start.isoformat(),
                 end=end.isoformat(),
                 interval="1d",
-                auto_adjust=True,
+                auto_adjust=False,
+                prepost=False,
                 actions=False,
                 group_by="column",
                 threads=threads,
@@ -149,33 +65,6 @@ def _download_batch(
     raise RuntimeError(f"가격 batch 다운로드 실패: {last_error}")
 
 
-def _parse_spark_response(payload: dict) -> dict[str, dict[date, float]]:
-    parsed: dict[str, dict[date, float]] = {}
-    results = payload.get("spark", {}).get("result") or []
-    for item in results:
-        ticker = str(item.get("symbol", "")).upper()
-        responses = item.get("response") or []
-        if not ticker or not responses:
-            continue
-        response = responses[0]
-        timestamps = response.get("timestamp") or []
-        quote = ((response.get("indicators") or {}).get("quote") or [{}])[0]
-        closes = quote.get("close") or response.get("close") or []
-        values: dict[date, float] = {}
-        for timestamp, close in zip(timestamps, closes):
-            if close is None:
-                continue
-            session_day = (
-                pd.Timestamp(timestamp, unit="s", tz="UTC")
-                .tz_convert("America/New_York")
-                .date()
-            )
-            values[session_day] = float(close)
-        if values:
-            parsed[ticker] = values
-    return parsed
-
-
 def _parse_chart_response(payload: dict, ticker: str) -> dict[date, float]:
     """Return regular-session raw closes keyed by the exchange session date."""
     chart = payload.get("chart") or {}
@@ -183,17 +72,28 @@ def _parse_chart_response(payload: dict, ticker: str) -> dict[date, float]:
     if not results:
         raise ValueError(f"Yahoo chart 응답에 {ticker} 데이터가 없습니다: {chart.get('error')}")
     result = results[0]
+    meta = result.get("meta") or {}
+    if meta.get("dataGranularity", "1d") != "1d":
+        raise ValueError("일봉 이외 데이터 거부")
+    if meta.get("symbol", ticker).upper() != ticker.upper():
+        raise ValueError("응답 ticker 불일치")
     timestamps = result.get("timestamp") or []
     quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
     closes = quote.get("close") or []
     timezone_name = (result.get("meta") or {}).get("exchangeTimezoneName") or "America/New_York"
     exchange_timezone = ZoneInfo(timezone_name)
     values: dict[date, float] = {}
+    if len(timestamps) != len(closes):
+        raise ValueError("일봉 timestamp/close 길이 불일치")
     for timestamp, close in zip(timestamps, closes):
-        if close is None:
-            continue
-        session_day = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(exchange_timezone).date()
-        values[session_day] = float(close)
+        local = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(exchange_timezone)
+        session_day = local.date()
+        if session_day in values:
+            raise ValueError("중복 거래일 데이터")
+        if not (9 * 60 + 30 <= local.hour * 60 + local.minute <= 16 * 60):
+            raise ValueError("정규장 밖의 일봉 timestamp")
+        # Yahoo quote.close contains binary float noise; US stock quotes use cents.
+        values[session_day] = round(float(close), 2) if close is not None else float("nan")
     if not values:
         raise ValueError(f"Yahoo chart 응답에 {ticker} 종가가 없습니다")
     return values
@@ -211,8 +111,8 @@ def _download_chart_ticker(
         "period1": int(datetime(period_start.year, period_start.month, period_start.day, tzinfo=timezone.utc).timestamp()),
         "period2": int(datetime(period_end.year, period_end.month, period_end.day, tzinfo=timezone.utc).timestamp()),
         "interval": "1d",
-        "events": "history",
-        "includeAdjustedClose": "true",
+        "events": "div,splits",
+        "includeAdjustedClose": "false",
         "includePrePost": "false",
     }
     last_error: Exception | None = None
@@ -226,7 +126,13 @@ def _download_chart_ticker(
                     timeout=settings.download_timeout_seconds,
                 )
                 response.raise_for_status()
-                values = _parse_chart_response(response.json(), ticker)
+                payload = response.json()
+                values = _parse_chart_response(payload, ticker)
+                result = payload["chart"]["result"][0]
+                for event in (result.get("events", {}).get("splits") or {}).values():
+                    split_day = datetime.fromtimestamp(event["date"], timezone.utc).astimezone(ZoneInfo("America/New_York")).date()
+                    if previous_session_date < split_day <= session_date:
+                        raise ValueError("Corporate action: 분할/병합 거래일은 수동 확인 필요")
                 LOGGER.debug("Yahoo chart %s 사용: %s", source, ticker)
                 return values
             except Exception as exc:
@@ -243,18 +149,6 @@ def _download_chart_ticker(
         if attempt < settings.download_retries:
             time.sleep(1)
     raise RuntimeError(f"Yahoo chart {ticker} 다운로드 실패: {last_error}")
-
-
-def _decode_spark_payload(response: requests.Response) -> dict:
-    """Decode direct Yahoo JSON or the same JSON wrapped by Jina Reader."""
-    try:
-        return response.json()
-    except requests.exceptions.JSONDecodeError:
-        start = response.text.find('{"spark"')
-        if start < 0:
-            raise ValueError("Yahoo spark JSON을 응답에서 찾지 못했습니다")
-        payload, _ = json.JSONDecoder().raw_decode(response.text[start:])
-        return payload
 
 
 def _download_close_batch(
@@ -447,7 +341,8 @@ def verify_candidates(
                 continue
             enriched = candidate.copy()
             for field, value in row.items():
-                enriched[field] = value
+                if field not in {"previous_close", "close", "change_pct"}:
+                    enriched[field] = value
             verified.append(enriched)
         except Exception as exc:
             fallback = candidate.copy()

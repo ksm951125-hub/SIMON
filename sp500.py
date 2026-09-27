@@ -49,6 +49,8 @@ def _validate_constituents(frame: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(frame.columns):
         raise ValueError(f"구성종목 필수 열 누락: {required - set(frame.columns)}")
     frame = frame.loc[:, ["ticker", "company_name", "sector"]].copy()
+    if frame.isna().any().any():
+        raise ValueError("구성종목에 NaN이 있습니다")
     for column in frame.columns:
         frame[column] = frame[column].astype(str).str.strip()
     if frame.empty or len(frame) < 450 or len(frame) > 550:
@@ -59,6 +61,8 @@ def _validate_constituents(frame: pd.DataFrame) -> pd.DataFrame:
     if (frame == "").any().any():
         raise ValueError("구성종목에 빈 값이 있습니다")
     frame["yahoo_ticker"] = frame["ticker"].map(to_yahoo_ticker)
+    if frame["yahoo_ticker"].duplicated().any():
+        raise ValueError("Yahoo ticker 변환 후 중복")
     return frame.sort_values("ticker").reset_index(drop=True)
 
 
@@ -70,6 +74,7 @@ def load_constituents(settings: Settings = SETTINGS) -> pd.DataFrame:
             settings.cache_file, index=False, encoding="utf-8"
         )
         LOGGER.info("최신 S&P 500 구성종목 %d개를 내려받았습니다", len(frame))
+        frame.attrs["source"] = "live"
         return frame
     except Exception as exc:
         LOGGER.warning("구성종목 다운로드 실패: %s", exc)
@@ -78,4 +83,5 @@ def load_constituents(settings: Settings = SETTINGS) -> pd.DataFrame:
         cached = pd.read_csv(settings.cache_file, dtype=str)
         frame = _validate_constituents(cached)
         LOGGER.warning("로컬 캐시의 구성종목 %d개를 사용합니다", len(frame))
+        frame.attrs["warning"] = "현재 구성종목 조회 실패: 캐시 목록의 최신성 확인 필요"
         return frame

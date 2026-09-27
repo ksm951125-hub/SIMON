@@ -53,19 +53,24 @@ jobs:
         run: python -m pytest -q
 
       - name: Run monitor
+        env:
+          INPUT_SEND_EMAIL: ${{ inputs.send_email }}
+          INPUT_DATE_US: ${{ inputs.session_date_us }}
+          INPUT_DATE_KR: ${{ inputs.session_date_kr }}
         shell: bash
         run: |
+          set -euo pipefail
           args=()
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${{ inputs.send_email }}" == "true" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${INPUT_SEND_EMAIL}" == "true" ]]; then
             args+=(--notify)
           else
             args+=(--dry-run)
           fi
-          if [[ -n "${{ inputs.session_date_us }}" ]]; then
-            args+=(--session-date-us "${{ inputs.session_date_us }}")
+          if [[ -n "${INPUT_DATE_US}" ]]; then
+            args+=(--session-date-us "${INPUT_DATE_US}")
           fi
-          if [[ -n "${{ inputs.session_date_kr }}" ]]; then
-            args+=(--session-date-kr "${{ inputs.session_date_kr }}")
+          if [[ -n "${INPUT_DATE_KR}" ]]; then
+            args+=(--session-date-kr "${INPUT_DATE_KR}")
           fi
           python main.py "${args[@]}"
 

@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from market_calendar import KST
 
 import pandas as pd
 import pytest
@@ -92,9 +93,9 @@ def test_kospi_weekend_uses_latest_two_data_sessions(monkeypatch):
         {"localTradedAt": "2026-06-12", "closePrice": "100"},
         {"localTradedAt": "2026-06-11", "closePrice": "101"},
     ]
-    monkeypatch.setattr("kospi._price_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr("kospi._index_rows", lambda *args, **kwargs: rows)
 
-    context = get_kospi_session_context()
+    context = get_kospi_session_context(now=datetime(2026, 10, 13, 8, tzinfo=KST))
 
     assert context.session_date == date(2026, 6, 12)
     assert context.previous_session_date == date(2026, 6, 11)
@@ -105,7 +106,7 @@ def test_kospi_holiday_override_is_rejected(monkeypatch):
         {"localTradedAt": "2026-06-05", "closePrice": "100"},
         {"localTradedAt": "2026-06-04", "closePrice": "101"},
     ]
-    monkeypatch.setattr("kospi._price_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr("kospi._index_rows", lambda *args, **kwargs: rows)
 
     with pytest.raises(ValueError, match="not a KOSPI trading session"):
         get_kospi_session_context(date(2026, 6, 6))
@@ -116,9 +117,9 @@ def test_kospi_long_holiday_keeps_actual_data_dates(monkeypatch):
         {"localTradedAt": "2026-10-12", "closePrice": "100"},
         {"localTradedAt": "2026-10-02", "closePrice": "101"},
     ]
-    monkeypatch.setattr("kospi._price_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr("kospi._index_rows", lambda *args, **kwargs: rows)
 
-    context = get_kospi_session_context()
+    context = get_kospi_session_context(now=datetime(2026, 10, 13, 8, tzinfo=KST))
 
     assert context.session_date == date(2026, 10, 12)
     assert context.previous_session_date == date(2026, 10, 2)

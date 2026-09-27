@@ -6,3 +6,8 @@ __pycache__/
 .cache/
 output/*
 !output/.gitkeep
+
+.env.*
+!.env.example
+.codex-test*/
+.codex-*-test*/
