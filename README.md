@@ -46,7 +46,7 @@ NYSE 캘린더에서 직전 실제 세션을 찾고 정규장 종료 + 2시간�
 
 Python 3.12, 읽기 전용 contents 권한, 의존성 설치, 단위 테스트, 모니터 실행, 결과 artifact 업로드 순서입니다. job timeout은 20분, 개별 시장은 별도 프로세스로 **300초** 후 강제 종료합니다. 개별 요청에는 timeout과 제한된 재시도를 적용합니다. 수동 입력은 shell에 직접 삽입하지 않고 환경변수로 전달합니다.
 
-수동 실행: Actions → **US + KOSPI Daily Drop Monitor → Run workflow**. `session_date_us`, `session_date_kr`를 비우면 자동 선택합니다. `send_email=false`가 기본 dry-run이며 `true`는 실제 메일을 보냅니다. 수동 메일 제목에는 `[TEST]`가 붙습니다.
+수동 실행: Actions → **US + KOSPI Daily Drop Monitor → Run workflow**. `session_date_us`, `session_date_kr`를 비우면 자동 선택합니다. `send_email=false`가 기본 dry-run이며 `true`는 실제 메일을 보냅니다. 수동 메일 제목에는 `[TEST]`가 붙습니다. `recipient_override`를 입력하면 해당 수동 실행에만 그 수신처를 사용하며, 비우면 저장된 Secret의 수신처를 사용합니다. 정기 발송 수신처는 바뀌지 않습니다.
 
 ## Secrets와 이메일
 

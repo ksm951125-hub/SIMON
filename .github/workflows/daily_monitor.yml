@@ -14,6 +14,10 @@ on:
         description: "Optional KOSPI session date (YYYY-MM-DD)"
         required: false
         type: string
+      recipient_override:
+        description: "Optional recipient for this manual run only (blank uses saved recipients)"
+        required: false
+        type: string
       send_email:
         description: "Send the combined Gmail notification"
         required: true
@@ -54,6 +58,7 @@ jobs:
 
       - name: Run monitor
         env:
+          INPUT_RECIPIENT: ${{ inputs.recipient_override }}
           INPUT_SEND_EMAIL: ${{ inputs.send_email }}
           INPUT_DATE_US: ${{ inputs.session_date_us }}
           INPUT_DATE_KR: ${{ inputs.session_date_kr }}
@@ -61,6 +66,9 @@ jobs:
         run: |
           set -euo pipefail
           args=()
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RECIPIENT}" ]]; then
+            export ALERT_EMAIL_RECIPIENT="${INPUT_RECIPIENT}"
+          fi
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${INPUT_SEND_EMAIL}" == "true" ]]; then
             args+=(--notify)
           else
