@@ -1,0 +1,59 @@
+name: Resend saved monitor report
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Completed monitor run containing the exact saved report"
+        required: true
+        type: string
+      recipient:
+        description: "Recipient for this resend only"
+        required: true
+        type: string
+      subject:
+        description: "Original email subject"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download original report
+        uses: actions/download-artifact@v4
+        with:
+          name: us-kospi-drop-report-${{ inputs.source_run_id }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: saved-report
+      - name: Send one unchanged report
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL_RECIPIENT: ${{ inputs.recipient }}
+          ORIGINAL_SUBJECT: ${{ inputs.subject }}
+        run: |
+          python - <<'PY'
+          import logging
+          import os
+          from pathlib import Path
+          from notifier import send_gmail_email
+
+          logging.basicConfig(level=logging.INFO)
+          reports = list(Path("saved-report").glob("combined-*.md"))
+          if len(reports) != 1:
+              raise RuntimeError("Expected exactly one saved report; refusing ambiguous resend")
+          plain = reports[0].read_text(encoding="utf-8")
+          html = reports[0].with_suffix(".html").read_text(encoding="utf-8")
+          send_gmail_email(plain, os.environ["ORIGINAL_SUBJECT"], html)
+          PY
