@@ -48,6 +48,7 @@ jobs:
           import os
           from pathlib import Path
           from notifier import send_gmail_email
+          from saved_report import validate_saved_report
 
           logging.basicConfig(level=logging.INFO)
           reports = list(Path("saved-report").glob("combined-*.md"))
@@ -55,5 +56,6 @@ jobs:
               raise RuntimeError("Expected exactly one saved report; refusing ambiguous resend")
           plain = reports[0].read_text(encoding="utf-8")
           html = reports[0].with_suffix(".html").read_text(encoding="utf-8")
+          validate_saved_report(reports[0].with_suffix(".json"), plain, html, os.environ["ORIGINAL_SUBJECT"])
           send_gmail_email(plain, os.environ["ORIGINAL_SUBJECT"], html)
           PY

@@ -2,10 +2,19 @@ name: US + KOSPI Daily Drop Monitor
 
 on:
   schedule:
-    # 23:00 UTC Monday-Friday = 08:00 KST Tuesday-Saturday.
-    - cron: "0 23 * * 1-5"
+    # 22:30 UTC Monday-Friday = 07:30 KST Tuesday-Saturday.
+    # US: 18:30 EDT / 17:30 EST = 2.5h / 1.5h after the NYSE close (market_calendar
+    # DATA_READY_DELAY=1h; Nasdaq cross-checks closes).
+    # KR: previous KRX session, closes final since ~16:30 KST.
+    - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:
+      market:
+        description: "Markets to run (all/us/kr)"
+        required: false
+        default: all
+        type: choice
+        options: [all, us, kr]
       session_date_us:
         description: "Optional US session date (YYYY-MM-DD)"
         required: false
@@ -39,6 +48,10 @@ jobs:
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       ALERT_EMAIL_RECIPIENT: ${{ secrets.ALERT_EMAIL_RECIPIENT }}
+      KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_VALIDATE: ${{ vars.KIS_VALIDATE }}
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repository
@@ -62,6 +75,7 @@ jobs:
           INPUT_SEND_EMAIL: ${{ inputs.send_email }}
           INPUT_DATE_US: ${{ inputs.session_date_us }}
           INPUT_DATE_KR: ${{ inputs.session_date_kr }}
+          INPUT_MARKET: ${{ inputs.market }}
         shell: bash
         run: |
           set -euo pipefail
@@ -76,6 +90,9 @@ jobs:
           fi
           if [[ -n "${INPUT_DATE_US}" ]]; then
             args+=(--session-date-us "${INPUT_DATE_US}")
+          fi
+          if [[ -n "${INPUT_MARKET}" ]]; then
+            args+=(--market "${INPUT_MARKET}")
           fi
           if [[ -n "${INPUT_DATE_KR}" ]]; then
             args+=(--session-date-kr "${INPUT_DATE_KR}")

@@ -1,7 +1,6 @@
 # Validated on Python 3.12; update deliberately with unit + live checks.
 numpy==2.3.5
 pandas==2.3.3
-yfinance==1.7.0
 pandas-market-calendars==5.4.0
 requests==2.34.2
 beautifulsoup4==4.15.0

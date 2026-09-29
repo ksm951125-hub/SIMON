@@ -1,210 +1,246 @@
+"""US regular-close collection: parsing, date matching, reconciliation, coverage."""
+import json
 from datetime import date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 import requests
 
-from market_data import (
-    _download_close_batch,
-    _parse_chart_response,
-    _parse_ticker,
-    download_market_data,
-    verify_candidates,
-)
+import market_data
 from config import Settings
-from detector import calculate_change_pct, is_drop
+from market_data import (Bar, PairResult, _parse_chart_response, _parse_nasdaq_payload, download_market_data,
+                         fetch_yahoo_pair, reconcile, select_pair)
+
+NY = ZoneInfo("America/New_York")
+FIXTURES = Path(__file__).parent / "fixtures"
+PREV, DAY = date(2026, 9, 25), date(2026, 9, 28)
+FAST = Settings(download_retries=1, retry_backoff_seconds=0, missing_retry_pause_seconds=0, availability_wait_seconds=0, max_workers=4)
 
 
-def test_mgm_historical_close_drop_regression():
-    timestamps = [
-        int(datetime(2026, 9, 23, 16, tzinfo=ZoneInfo("America/New_York")).timestamp()),
-        int(datetime(2026, 9, 24, 16, tzinfo=ZoneInfo("America/New_York")).timestamp()),
-    ]
-    payload = {
-        "chart": {
-            "result": [
-                {
-                    "meta": {"exchangeTimezoneName": "America/New_York"},
-                    "timestamp": timestamps,
-                    "indicators": {
-                        "quote": [{"close": [37.85, 33.69]}],
-                        "adjclose": [{"adjclose": [37.85, 33.69]}],
-                    },
-                }
-            ],
-            "error": None,
-        }
-    }
-
-    values = _parse_chart_response(payload, "MGM")
-    previous_close = values[date(2026, 9, 23)]
-    latest_close = values[date(2026, 9, 24)]
-    change_pct = calculate_change_pct(previous_close, latest_close)
-
-    assert previous_close == pytest.approx(37.85)
-    assert latest_close == pytest.approx(33.69)
-    assert change_pct == pytest.approx(-10.990752972259)
-    assert is_drop(change_pct) is True
+def chart(ticker="TEST", days=(PREV, DAY), closes=(100.0, 90.0), volumes=(1000, 1000), hour=9, minute=30):
+    return {"chart": {"result": [{
+        "meta": {"symbol": ticker, "exchangeTimezoneName": "America/New_York", "dataGranularity": "1d",
+                 "regularMarketPrice": 1, "postMarketPrice": 2},
+        "timestamp": [int(datetime(d.year, d.month, d.day, hour, minute, tzinfo=NY).timestamp()) for d in days],
+        "indicators": {"quote": [{"close": list(closes), "volume": list(volumes), "open": list(closes),
+                                  "high": list(closes), "low": list(closes)}],
+                       "adjclose": [{"adjclose": [1.0] * len(days)}]}}]}}
 
 
-def test_candidate_survives_secondary_verification_outage(monkeypatch, tmp_path):
-    candidate = pd.DataFrame(
-        [{
-            "ticker": "MGM",
-            "yahoo_ticker": "MGM",
-            "company_name": "MGM Resorts International",
-            "previous_close": 37.85,
-            "close": 33.69,
-            "change_pct": calculate_change_pct(37.85, 33.69),
-        }]
-    )
-
-    def fail_download(*args, **kwargs):
-        raise RuntimeError("secondary provider unavailable")
-
-    monkeypatch.setattr("market_data._download_batch", fail_download)
-    settings = Settings(
-        cache_file=tmp_path / "constituents.csv",
-        output_dir=tmp_path / "output",
-        yfinance_cache_dir=tmp_path / "yf-cache",
-    )
-
-    verified, rejected = verify_candidates(
-        candidate, date(2026, 9, 24), date(2026, 9, 23), settings
-    )
-
-    assert rejected == {}
-    assert verified.iloc[0]["ticker"] == "MGM"
-    assert verified.iloc[0]["verification_status"] == "primary_daily_close_only"
+def constituents(*tickers):
+    return pd.DataFrame({"ticker": list(tickers), "yahoo_ticker": [t.replace(".", "-") for t in tickers],
+                         "company_name": [f"{t} Corp" for t in tickers], "sector": "X"})
 
 
-def test_missing_session_is_reported():
-    frame = pd.DataFrame(
-        {"Open": [100], "Low": [88], "Close": [89], "Volume": [1000]},
-        index=pd.to_datetime(["2025-01-03"]),
-    )
-    row, error = _parse_ticker("TEST", frame, date(2025, 1, 3), date(2025, 1, 2))
-    assert row is None
-    assert "필수 거래일 누락" in error
+def test_parser_uses_raw_close_not_adjclose_or_extended_price():
+    bars = _parse_chart_response(chart(), "TEST")
+    assert [bars[PREV].close, bars[DAY].close] == [100.0, 90.0]
 
 
-def test_insufficient_volume_history_is_reported():
-    dates = pd.bdate_range("2024-12-23", "2025-01-03")
-    frame = pd.DataFrame(
-        {"Open": 100.0, "Low": 88.0, "Close": 100.0, "Volume": 1000.0},
-        index=dates,
-    )
-    row, error = _parse_ticker("TEST", frame, date(2025, 1, 3), date(2025, 1, 2))
-    assert row is None
-    assert "20일 거래량 표본 부족" in error
+def test_parser_strips_float_noise_to_cents():
+    bars = _parse_chart_response(chart(closes=(288.70001220703125, 262.8699951171875)), "TEST")
+    assert (bars[PREV].close, bars[DAY].close) == (288.70, 262.87)
 
 
-def test_valid_data_calculates_metrics():
-    dates = pd.bdate_range("2024-12-02", "2025-01-03")
-    frame = pd.DataFrame(
-        {"Open": 100.0, "Low": 88.0, "Close": 100.0, "Volume": 1000.0},
-        index=dates,
-    )
-    frame.loc[pd.Timestamp("2025-01-03"), ["Open", "Close"]] = [95.0, 89.0]
-    row, error = _parse_ticker("TEST", frame, date(2025, 1, 3), date(2025, 1, 2))
-    assert error is None
-    assert row["change_pct"] == pytest.approx(-11.0)
-    assert row["average_volume_20d"] == 1000
+def test_parser_accepts_last_trade_timestamp_just_after_bell():
+    bars = _parse_chart_response(chart(hour=16, minute=2), "TEST")
+    assert DAY in bars
 
 
-def test_query1_429_uses_query2(monkeypatch, tmp_path):
+@pytest.mark.parametrize("hour", [18, 7])
+def test_parser_rejects_extended_hours_timestamp(hour):
+    with pytest.raises(ValueError, match="정규장"):
+        _parse_chart_response(chart(hour=hour), "TEST")
+
+
+def test_parser_rejects_holiday_bar():
+    with pytest.raises(ValueError, match="정규장"):
+        _parse_chart_response(chart(days=(date(2025, 7, 3), date(2025, 7, 4))), "TEST")
+
+
+def test_parser_rejects_ticker_mismatch_and_duplicates():
+    with pytest.raises(ValueError, match="ticker"):
+        _parse_chart_response(chart("OTHER"), "TEST")
+    with pytest.raises(ValueError, match="중복"):
+        _parse_chart_response(chart(days=(DAY, DAY)), "TEST")
+
+
+def test_null_close_row_is_dropped_not_nan():
+    bars = _parse_chart_response(chart(closes=(100.0, None)), "TEST")
+    assert DAY not in bars
+    assert "필수 거래일" in select_pair(bars, PREV, DAY, "Yahoo").error
+
+
+def test_pair_is_selected_by_date_not_last_row():
+    bars = _parse_chart_response(chart(days=(date(2026, 9, 24), PREV, DAY, date(2026, 9, 29)),
+                                       closes=(50, 100, 90, 10), volumes=(1, 1, 1, 1)), "TEST")
+    pair = select_pair(bars, PREV, DAY, "Yahoo")
+    assert (pair.previous_close, pair.close) == (100, 90)
+
+
+def test_wrong_date_rows_are_rejected():
+    bars = _parse_chart_response(chart(days=(date(2026, 9, 23), date(2026, 9, 24))), "TEST")
+    assert not select_pair(bars, PREV, DAY, "Yahoo").ok
+
+
+def test_stale_rows_are_rejected():
+    bars = {PREV: Bar(100, 10), DAY: Bar(100, 10)}
+    assert "stale" in select_pair(bars, PREV, DAY, "Yahoo").error
+    bars = {PREV: Bar(100, 10), DAY: Bar(90, 0)}
+    assert "거래량 0" in select_pair(bars, PREV, DAY, "Yahoo").error
+
+
+def test_request_disables_extended_hours_and_bounds_retries(monkeypatch):
     calls = []
 
-    class FakeResponse:
-        def __init__(self, status_code, text=""):
-            self.status_code = status_code
-            self.text = text
+    def fail(url, **kwargs):
+        calls.append((url, kwargs))
+        raise requests.Timeout("simulated")
 
-        def raise_for_status(self):
-            if self.status_code >= 400:
-                error = requests.HTTPError(f"status {self.status_code}")
-                error.response = self
-                raise error
+    monkeypatch.setattr("net.requests.get", fail)
+    monkeypatch.setattr("net.time.sleep", lambda *_: None)
+    pair = fetch_yahoo_pair("TEST", PREV, DAY, Settings(download_retries=2))
+    assert not pair.ok and "Yahoo" in pair.error
+    assert len(calls) == 4  # 2 hosts x 2 attempts, never unbounded
+    assert all(c[1]["params"]["includePrePost"] == "false" and c[1]["params"]["interval"] == "1d" for c in calls)
+    assert all(c[1]["timeout"][0] <= 5 and c[1]["timeout"][1] <= 10 for c in calls)
 
+
+def test_query1_429_falls_back_to_query2(monkeypatch):
+    class Response:
+        def __init__(self, status, payload=None):
+            self.status_code, self.payload = status, payload
         def json(self):
-            return {
-                "chart": {
-                    "result": [
-                        {
-                            "meta": {"exchangeTimezoneName": "America/New_York"},
-                            "timestamp": [1735851600],
-                            "indicators": {"quote": [{"close": [100.0]}]},
-                        }
-                    ],
-                    "error": None,
-                }
-            }
+            return self.payload
 
-    def fake_get(url, **kwargs):
-        calls.append((url, kwargs.get("params")))
-        if len(calls) == 1:
-            return FakeResponse(429)
-        return FakeResponse(200, "chart")
+    def get(url, **kwargs):
+        return Response(429) if "query1" in url else Response(200, chart())
 
-    monkeypatch.setattr("market_data.requests.get", fake_get)
-    settings = Settings(
-        download_retries=1,
-        cache_file=tmp_path / "constituents.csv",
-        output_dir=tmp_path / "output",
-        yfinance_cache_dir=tmp_path / "yf-cache",
-    )
-
-    result = _download_close_batch(
-        ["AAPL"],
-        date(2025, 1, 1),
-        date(2025, 1, 2),
-        settings,
-    )
-
-    assert result["AAPL"][date(2025, 1, 2)] == 100.0
-    assert calls[0][1] is not None
-    assert calls[1][1] is not None
-    assert "query1.finance.yahoo.com" in calls[0][0]
-    assert "query2.finance.yahoo.com" in calls[1][0]
+    monkeypatch.setattr("net.requests.get", get)
+    monkeypatch.setattr("net.time.sleep", lambda *_: None)
+    pair = fetch_yahoo_pair("TEST", PREV, DAY, FAST)
+    assert (pair.previous_close, pair.close) == (100, 90)
 
 
-def test_partial_chart_failure_is_reported(monkeypatch, tmp_path):
-    session_date = date(2025, 1, 3)
-    previous_session_date = date(2025, 1, 2)
-    tickers = [f"T{index:02d}" for index in range(30)]
-    constituents = pd.DataFrame(
-        {
-            "ticker": tickers,
-            "yahoo_ticker": tickers,
-            "company_name": tickers,
-            "sector": "Test",
-        }
-    )
+def test_split_inside_window_is_annotated(monkeypatch):
+    data = chart()
+    data["chart"]["result"][0]["events"] = {"splits": {"x": {"date": data["chart"]["result"][0]["timestamp"][1],
+                                                               "splitRatio": "2:1"}}}
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return data
+
+    monkeypatch.setattr("net.requests.get", lambda *a, **k: Response())
+    pair = fetch_yahoo_pair("TEST", PREV, DAY, FAST)
+    assert pair.ok and "분할" in pair.note
+
+
+def test_nasdaq_parser_reads_official_close():
+    payload = json.loads((FIXTURES / "nasdaq-BE-2026-09-28.json").read_text(encoding="utf-8"))
+    bars = _parse_nasdaq_payload(payload)
+    assert (bars[PREV].close, bars[DAY].close) == (288.70, 262.87)
+    with pytest.raises(ValueError):
+        _parse_nasdaq_payload({"data": {"tradesTable": None}, "status": {"rCode": 200}})
+
+
+def test_reconcile_agreement_mismatch_and_fallback():
+    ok = PairResult(100, 91)
+    row, _ = reconcile("T", ok, PairResult(100, 91), -10, -8)
+    assert row["validation"] == "Nasdaq 일치" and not row["detected"]
+    # Providers disagree: recall first, detected when either source qualifies.
+    row, _ = reconcile("T", ok, PairResult(100, 89), -10, -8)
+    assert row["mismatch"] and row["detected"] and row["source"] == "Nasdaq"
+    row, _ = reconcile("T", PairResult(error="Yahoo down"), PairResult(100, 85), -10, -8)
+    assert row["fallback"] and row["detected"]
+    row, reason = reconcile("T", PairResult(error="Yahoo down"), PairResult(error="Nasdaq down"), -10, -8)
+    assert row is None and "Yahoo down" in reason and "Nasdaq down" in reason
+
+
+def _fake_sources(monkeypatch, yahoo: dict, nasdaq: dict):
+    monkeypatch.setattr(market_data, "fetch_yahoo_pair",
+                        lambda t, p, d, s: yahoo.get(t) or PairResult(error=f"Yahoo 필수 거래일 누락 {t}"))
+    monkeypatch.setattr(market_data, "fetch_nasdaq_pair",
+                        lambda t, p, d, s: nasdaq.get(t) or PairResult(error=f"Nasdaq 없음 {t}"))
+
+
+def test_bulk_partial_provider_gap_counts_only_validated_pairs(monkeypatch):
+    universe = constituents("AAA", "BBB", "CCC", "BRK.B")
+    _fake_sources(monkeypatch,
+                  yahoo={"AAA": PairResult(100, 89.99), "BBB": PairResult(100, 95), "BRK-B": PairResult(400, 401)},
+                  nasdaq={"AAA": PairResult(100, 89.99), "BRK-B": PairResult(400, 401)})
+    result = download_market_data(universe, DAY, PREV, FAST)
+    assert len(result.prices) == 3 and set(result.missing) == {"CCC"}
+    assert list(result.prices.loc[result.prices.detected, "ticker"]) == ["AAA"]
+    assert "BRK.B" in set(result.prices.ticker)  # symbol mapping BRK.B <-> BRK-B
+
+
+def test_nasdaq_outage_trips_circuit_breaker_and_keeps_primary(monkeypatch):
+    tickers = [f"T{i:03d}" for i in range(60)]
     calls = []
+    monkeypatch.setattr(market_data, "fetch_yahoo_pair", lambda t, p, d, s: PairResult(100, 99))
 
-    def fake_download(requested, previous_date, latest_date, settings):
-        calls.append(list(requested))
-        returned = requested[:10] if len(calls) == 1 else requested
-        data = {
-            ticker: {previous_session_date: 100.0, session_date: 89.0}
-            for ticker in returned
-        }
-        return data
+    def nasdaq(t, p, d, s):
+        calls.append(t)
+        return PairResult(error="HTTP 403")
 
-    monkeypatch.setattr("market_data._download_close_batch", fake_download)
-    settings = Settings(
-        batch_size=30,
-        batch_pause_seconds=0,
-        cache_file=tmp_path / "constituents.csv",
-        output_dir=tmp_path / "output",
-        yfinance_cache_dir=tmp_path / "yf-cache",
-    )
+    monkeypatch.setattr(market_data, "fetch_nasdaq_pair", nasdaq)
+    result = download_market_data(constituents(*tickers), DAY, PREV, Settings(max_workers=1, missing_retry_pause_seconds=0))
+    assert len(result.prices) == 60 and not result.missing
+    assert not result.secondary_available and len(calls) < 60
+    assert any("교차검증 불가" in n for n in result.notices) and not result.warnings
 
-    prices, missing = download_market_data(
-        constituents, session_date, previous_session_date, settings
-    )
 
-    assert len(prices) == 10
-    assert len(missing) == 20
-    assert [len(batch) for batch in calls] == [30]
+def test_us_2026_09_28_regression_from_recorded_closes(monkeypatch):
+    """TEST 17: real regular closes recorded from Yahoo and Nasdaq for all 503."""
+    frame = pd.read_csv(FIXTURES / "us-2026-09-28-closes.csv", dtype={"ticker": str})
+    yahoo = {row.ticker.replace(".", "-"): PairResult(round(row.yahoo_prev_2026_09_25, 2), round(row.yahoo_close_2026_09_28, 2))
+             for row in frame.itertuples()}
+    nasdaq = {row.ticker.replace(".", "-"): PairResult(float(row.nasdaq_prev_2026_09_25), float(row.nasdaq_close_2026_09_28))
+              for row in frame.itertuples() if pd.notna(row.nasdaq_prev_2026_09_25)}
+    _fake_sources(monkeypatch, yahoo, nasdaq)
+    result = download_market_data(constituents(*frame.ticker), DAY, PREV, FAST)
+    assert len(result.prices) == 503 and not result.missing
+    assert result.mismatch_count == 0 and result.cross_checked_count == 502  # BF.B unsupported by Nasdaq
+    assert result.prices["detected"].sum() == 0
+    worst = result.prices.sort_values("change_pct").iloc[0]
+    assert worst.ticker == "BE" and worst.change_pct == pytest.approx(-8.947, abs=1e-3)
+    # Independent recomputation straight from the fixture agrees.
+    independent = ((frame.nasdaq_close_2026_09_28.astype(float) / frame.nasdaq_prev_2026_09_25.astype(float) - 1) * 100)
+    assert (independent.dropna() <= -10).sum() == 0
+
+
+def test_real_be_payload_parses_to_regular_closes():
+    payload = json.loads((FIXTURES / "yahoo-chart-BE-2026-09-28.json").read_text(encoding="utf-8"))
+    pair = select_pair(_parse_chart_response(payload, "BE"), PREV, DAY, "Yahoo")
+    assert (pair.previous_close, pair.close) == (288.70, 262.87)
+
+
+def test_unverified_candidate_in_validation_band_raises_warning(monkeypatch):
+    _fake_sources(monkeypatch, yahoo={"AAA": PairResult(100, 91), "BBB": PairResult(100, 99)},
+                  nasdaq={"BBB": PairResult(100, 99)})
+    result = download_market_data(constituents("AAA", "BBB"), DAY, PREV, FAST)
+    assert any("AAA" in warning for warning in result.warnings)
+    assert "2차 검증 불가" in result.prices.set_index("ticker").loc["AAA", "note"]
+
+
+def test_throttled_secondary_stops_after_consecutive_failures(monkeypatch):
+    tickers = [f"T{i:03d}" for i in range(100)]
+    calls = []
+    monkeypatch.setattr(market_data, "fetch_yahoo_pair",
+                        lambda t, p, d, s: PairResult(100, 100 - int(t[1:]) / 10))
+
+    def nasdaq(t, p, d, s):
+        calls.append(t)
+        return PairResult(100, 100 - int(t[1:]) / 10) if len(calls) <= 10 else PairResult(error="HTTP 403")
+
+    monkeypatch.setattr(market_data, "fetch_nasdaq_pair", nasdaq)
+    result = download_market_data(constituents(*tickers), DAY, PREV, Settings(max_workers=1, missing_retry_pause_seconds=0))
+    assert len(calls) == 10 + market_data.NASDAQ_CIRCUIT_BREAKER
+    # The largest decliners were verified first.
+    verified = set(result.prices.loc[result.prices.cross_checked, "ticker"])
+    assert verified == {f"T{i:03d}" for i in range(90, 100)}
+    assert any("10/100" in notice for notice in result.notices)

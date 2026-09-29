@@ -16,7 +16,11 @@ def _worker(connection, function, argument):
         connection.close()
 
 
-def execute_market(function, argument, timeout_seconds=300):
+def execute_market(function, argument, timeout_seconds=None):
+    if timeout_seconds is None:
+        from config import SETTINGS
+
+        timeout_seconds = SETTINGS.market_deadline_seconds
     context = mp.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(target=_worker, args=(sender, function, argument))

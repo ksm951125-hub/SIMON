@@ -9,10 +9,11 @@ import pandas_market_calendars as mcal
 
 KST = ZoneInfo("Asia/Seoul")
 NEW_YORK = ZoneInfo("America/New_York")
-# Yahoo's completed daily bars are not consistently available immediately at
-# the NYSE close. Production runs have returned mostly-NaN universes for the
-# just-closed session, so only select it after a conservative settlement lag.
-DATA_READY_DELAY = timedelta(hours=2)
+# Daily bars are not consistently final immediately at the NYSE close, so only
+# select a session after a settlement lag. The 07:30 KST schedule runs 1.5h
+# (EST) / 2.5h (EDT) after the close; closes are cross-checked against Nasdaq
+# and missing sessions are retried (net.retry_until_available).
+DATA_READY_DELAY = timedelta(hours=1)
 
 
 @dataclass(frozen=True)

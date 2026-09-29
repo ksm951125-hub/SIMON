@@ -1,50 +1,30 @@
-"""Opt-in network checks. These never send mail or use SMTP credentials."""
-import json
+"""Opt-in network checks (RUN_LIVE_TESTS=1). Never send mail or use SMTP credentials."""
 import os
-from pathlib import Path
+from datetime import date
 
 import pytest
 
 from config import Settings
-from detector import calculate_change_pct
-from kospi import _price_rows, _chart_price_pair, _download_price_pair, get_kospi_session_context
-from market_calendar import get_session_context
-from market_data import _download_chart_ticker, _download_batch, _ticker_frame
+from kospi import fetch_naver_days, fetch_yahoo_kr_pair
+from market_data import fetch_nasdaq_pair, fetch_yahoo_pair
 
-pytestmark = [pytest.mark.integration, pytest.mark.skipif(os.getenv("RUN_LIVE_TESTS") != "1", reason="set RUN_LIVE_TESTS=1 to query live public sources")]
-
-
-def save(name, payload):
-    path = Path("output/audit/live")
-    path.mkdir(parents=True, exist_ok=True)
-    (path / (name + ".json")).write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+pytestmark = [pytest.mark.integration,
+              pytest.mark.skipif(os.getenv("RUN_LIVE_TESTS") != "1", reason="set RUN_LIVE_TESTS=1 to query live public sources")]
+SETTINGS = Settings(download_retries=2)
 
 
-@pytest.mark.parametrize("ticker", ["AAPL", "MSFT", "MGM"])
-def test_us_regular_daily_close_matches_unadjusted_history(ticker):
-    from datetime import timedelta
-    import yfinance as yf
-    cache = Path("output/audit/yf-cache")
-    cache.mkdir(parents=True, exist_ok=True)
-    yf.set_tz_cache_location(str(cache))
-    context = get_session_context()
-    previous, session = context.previous_session_date, context.session_date
-    values = _download_chart_ticker(ticker, previous, session, Settings(download_retries=1))
-    data = _ticker_frame(_download_batch([ticker], previous, session+timedelta(days=1), Settings(download_retries=1), threads=False), ticker, 1)
-    data.index = data.index.date
-    cross = [round(float(data.loc[day, "Close"]),2) for day in [previous,session]]
-    pair = [values[day] for day in [previous,session]]
-    save(ticker,{"previous_session":previous,"session":session,"program_close":pair,"yfinance_auto_adjust_false_close":cross,"change_pct":calculate_change_pct(*pair),"sources_independent":False,"includePrePost":False})
-    assert pair == pytest.approx(cross, abs=0.005)
+@pytest.mark.parametrize("ticker", ["BE", "AAPL", "BRK-B"])
+def test_us_2026_09_28_yahoo_matches_nasdaq_official_close(ticker):
+    previous, session = date(2026, 9, 25), date(2026, 9, 28)
+    yahoo = fetch_yahoo_pair(ticker, previous, session, SETTINGS)
+    nasdaq = fetch_nasdaq_pair(ticker, previous, session, SETTINGS)
+    assert yahoo.ok and nasdaq.ok, (yahoo.error, nasdaq.error)
+    assert (yahoo.previous_close, yahoo.close) == pytest.approx((nasdaq.previous_close, nasdaq.close), abs=0.011)
 
 
-@pytest.mark.parametrize("code", ["005930", "000660", "005380"])
-def test_kr_daily_close_matches_separate_dated_chart(code):
-    context = get_kospi_session_context()
-    previous, session = context.previous_session_date, context.session_date
-    pair = _download_price_pair(code, session, previous, context.price_page)
-    cross = _chart_price_pair(code, previous, session)
-    rows = _price_rows(code,1)
-    quoted = next(row.get("fluctuationsRatio") for row in rows if row["localTradedAt"] == str(session))
-    save(code,{"previous_session":previous,"session":session,"program_close":pair,"naver_chart_close":cross,"change_pct":calculate_change_pct(*pair),"naver_displayed_pct":quoted,"sources_independent":False})
-    assert pair == pytest.approx(cross,abs=0.01)
+def test_kr_yahoo_close_matches_naver_krx_base_price():
+    # SK이노베이션: KRX 2026-09-28 close 158,200 (Naver integrated/NXT last 158,900).
+    pair = fetch_yahoo_kr_pair("096770", date(2026, 9, 28), date(2026, 9, 29), SETTINGS)
+    days = fetch_naver_days("096770", SETTINGS, page_size=10)
+    assert pair.ok, pair.error
+    assert days[date(2026, 9, 29)].krx_base_price == pair.previous_close == 158200

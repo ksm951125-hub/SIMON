@@ -80,7 +80,7 @@ def test_combined_zero_drop_email_is_explicit():
     assert "S&P 500 급락 모니터" in markdown
     assert "KOSPI 급락 모니터" in markdown
     assert markdown.count("기준 이하 급락 종목 없음") == 2
-    assert subject == "[급락 모니터] 급락: S&P500 0개 · KOSPI 0개 | 데이터 오류: US 0건 / KR 0건"
+    assert subject == "[급락 모니터] S&P500 0개 · KOSPI 0개"
 
 
 def test_combined_data_warning_does_not_claim_zero():
@@ -90,15 +90,16 @@ def test_combined_data_warning_does_not_claim_zero():
     )
     kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="DATA_INCOMPLETE",
+        code_column="code", currency="KRW", status="FAILED",
         total_count=944, analyzed_count=100, error="simulated outage",
     )
 
     markdown = render_combined_markdown(us, kr, datetime(2026, 9, 25, 8, tzinfo=KST))
     subject = build_combined_subject(us, kr)
 
-    assert "탐지: 확인 필요 (데이터 불완전)" in markdown
-    assert "[DATA WARNING]" in subject
+    assert "Detected: 확인 필요" in markdown
+    assert "DATA FAILED" in markdown
+    assert "[FAILED KR]" in subject
     assert "KOSPI 확인필요" in subject
 
 
@@ -131,7 +132,7 @@ def test_html_report_candidates_warning_and_long_korean_name():
     )
     kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="PARTIAL",
+        code_column="code", currency="KRW", status="WARNING",
         session_date=date(2026, 6, 5), previous_session_date=date(2026, 6, 4),
         total_count=944, analyzed_count=942, candidates=_candidates("KR", 37),
         missing={
@@ -143,8 +144,8 @@ def test_html_report_candidates_warning_and_long_korean_name():
     html = build_html_report(us, kr, datetime(2026, 9, 25, 8, tzinfo=KST))
 
     assert "multipart" not in html
-    assert "&#9888; PARTIAL" in html
-    assert "데이터 누락 · 2건" in html
+    assert "&#9888; WARNING" in html
+    assert "데이터 누락·경고 · 2건" in html
     assert "외 27개 종목 (전체 목록)" in html
     assert html.count("&#9660;&nbsp;") == 40
     assert "매우 긴 한글 회사명 주식회사 글로벌 테스트 홀딩스" in html
@@ -152,7 +153,7 @@ def test_html_report_candidates_warning_and_long_korean_name():
     assert "max-width:760px" in html
     assert "javascript" not in html.lower()
     assert build_combined_subject(us, kr, "[TEST] ") == (
-        "[TEST][급락 모니터][DATA WARNING] 급락: S&P500 3개 · KOSPI 37개 | 데이터 오류: US 0건 / KR 2건"
+        "[TEST][급락 모니터][DATA WARNING] S&P500 3개 · KOSPI 37개 | 데이터 누락 US 0건 / KR 2건"
     )
 
 
@@ -169,4 +170,4 @@ def test_html_report_zero_candidates_has_no_warning_card():
     html = build_html_report(us, kr, datetime(2026, 9, 25, 8, tzinfo=KST))
 
     assert html.count("기준 이하 급락 종목 없음") == 2
-    assert "데이터 누락 ·" not in html
+    assert "데이터 누락·경고 ·" not in html
