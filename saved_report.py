@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-REPORT_SCHEMA = "regular-close-v3"
+REPORT_SCHEMA = "regular-close-v4"
 
 
 def validate_saved_report(path: Path, plain: str, html: str, subject: str) -> None:
@@ -17,5 +17,5 @@ def validate_saved_report(path: Path, plain: str, html: str, subject: str) -> No
     if {m.get("market") for m in markets} != {"US", "KR"} or len(markets) != 2:
         raise ValueError("Saved market metadata missing")
     for market in markets:
-        if market.get("status") in {"WARNING", "FAILED"} and not any(tag in subject for tag in ("DATA WARNING", "FAILED")):
-            raise ValueError("Warning report must retain DATA WARNING/FAILED in subject")
+        if market.get("status") in {"WARNING", "ERROR"} and not any(tag in subject for tag in ("DATA WARNING", "ERROR")):
+            raise ValueError("Warning report must retain DATA WARNING/ERROR in subject")

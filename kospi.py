@@ -5,10 +5,8 @@ Universe: Naver KOSPI market listing, filtered to common/preferred stocks
 reported as a WARNING while every loaded stock is still analyzed; only a
 structurally broken listing (large loss, too few stocks) fails the market.
 
-Prices: Yahoo `<code>.KS` daily bars = KRX regular-session closes (primary).
-Naver daily rows provide the KRX base price of the analysis day (independent
-check of the previous close) and a flagged fallback. Optional official checks
-when configured: KRX Open API bulk closes (KRX_API_KEY), KIS (KIS_VALIDATE=1).
+Prices: see the "Prices" section below (Yahoo KRX close + Daum + Naver, field-level
+consensus in validation.py, special-trading rules in special_trading.py).
 """
 from __future__ import annotations
 
@@ -16,32 +14,29 @@ import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pandas_market_calendars as mcal
 
 from config import SETTINGS, Settings
-from detector import calculate_change_pct, is_drop
 from market_calendar import KST
-from net import get_with_retry, retry_until_available
+from net import retry_until_available
+from providers import daum, krx_official, naver, yahoo
+from providers.base import NOT_PROVIDED, OK, FieldValue, PriceObservation
+from special_trading import SPECIAL_TRADING_UNCONFIRMED, SPECIAL_TRADING_VALIDATED, assess_kr_move
+from validation import INFO, NORMAL, WARNING, assess
 
 LOGGER = logging.getLogger(__name__)
 
 NAVER_MARKET_URL = "https://m.stock.naver.com/api/stocks/marketValue/KOSPI"
-NAVER_PRICE_URL = "https://m.stock.naver.com/api/stock/{code}/price"
 NAVER_INDEX_URL = "https://m.stock.naver.com/api/index/KOSPI/price"
-YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-NAVER_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json", "Referer": "https://m.stock.naver.com/"}
 LIST_PAGE_SIZE = 100
 LISTING_ATTEMPTS = 3
 # Listing integrity limits (no hard-coded exact count: listings change daily).
 MIN_LISTING_RATIO = 0.98
 MIN_STOCK_COUNT = 500
-# KOSPI daily price limit is +-30%; anything beyond implies a reference-price
-# reset (split/reverse split/re-listing) and needs manual confirmation.
-PRICE_LIMIT_PCT = 30.01
 
 
 class ListingError(RuntimeError):
@@ -53,6 +48,7 @@ class KospiSessionContext:
     session_date: date
     previous_session_date: date
     warning: str | None = None
+    warning_level: str = "WARNING"
 
 
 @dataclass
@@ -62,11 +58,11 @@ class KrCollection:
     fallback_count: int = 0
     mismatch_count: int = 0
     cross_checked_count: int = 0
-    warnings: list[str] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
 
 def _json(url: str, params: dict, settings: Settings = SETTINGS):
-    return get_with_retry(url, params=params, headers=NAVER_HEADERS, settings=settings).json()
+    return naver.json_get(url, params, settings)
 
 
 # --------------------------------------------------------------------------
@@ -112,7 +108,8 @@ def get_kospi_session_context(session_date: date | None = None, now: datetime | 
         current = session_date or calendar[-1]
         previous = max(day for day in calendar if day < current)
         LOGGER.warning("[KR] 지수 이력 조회 실패 → XKRX 캘린더 사용: %s", exc)
-        return KospiSessionContext(current, previous, f"KOSPI 지수 이력 조회 실패, XKRX 캘린더로 거래일 판정 ({exc})")
+        # The exchange calendar alone is a reliable basis: informational only.
+        return KospiSessionContext(current, previous, f"KOSPI 지수 이력 조회 실패, XKRX 캘린더로 거래일 판정 ({exc})", "INFO")
 
     eligible = sorted(day for day in traded if day <= end)
     if session_date is not None:
@@ -225,190 +222,23 @@ def load_kospi_constituents(settings: Settings = SETTINGS) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Prices
 # --------------------------------------------------------------------------
-# Why not Naver closes: since Nextrade (NXT) launched, Naver/Daum daily
-# "closePrice" is the integrated last trade, which includes NXT after-market
-# prints until 20:00 KST. It differs from the KRX regular close for most
-# stocks. Naver's `closePrice - compareToPreviousClosePrice` however is the
-# KRX base price of that day (= previous KRX regular close unless a corporate
-# action reset it), which makes it an independent check of the previous close.
-@dataclass
-class KrPair:
-    previous_close: float | None = None
-    close: float | None = None
-    volume: float | None = None
-    error: str | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and self.previous_close is not None and self.close is not None
+# Sources (providers/), all for the EXACT analysis/previous dates:
+#   PRIMARY    Yahoo <code>.KS            KRX regular close (prev + close)
+#   SECONDARY  Daum quote snapshot        KRX regular close (regularTradePrice), KRX base,
+#                                         market state (정리매매/거래정지/액면변경/...)
+#   TERTIARY   Naver daily                KRX base of the analysis day (= prev close);
+#                                         integrated close only when the stock has no NXT
+#                                         trading or had no trades at all
+#   ON DEMAND  Daum daily rows            KRX base (when prev is not yet confirmed by 2)
+#   OPTIONAL   KRX Open API (KRX_API_KEY), KIS (KIS_VALIDATE=1)
+# Naver/Daum "close" is the KRX+NXT integrated last trade and is never used as a
+# regular close for NXT-traded stocks.
+PRICE_TOLERANCE_KRW = 0.5
 
 
-@dataclass
-class NaverDay:
-    """Naver mobile daily row: integrated close + KRX base price for the day."""
-    integrated_close: float | None
-    krx_base_price: float | None
-    volume: float | None
-    official_change_pct: float | None
-
-
-def _positive(value) -> float | None:
-    try:
-        number = float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) and number > 0 else None
-
-
-def _signed(value) -> float | None:
-    try:
-        number = float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def yahoo_kr_symbol(code: str) -> str:
-    return f"{code}.KS"
-
-
-def _parse_yahoo_kr(payload: dict, code: str) -> dict[date, tuple[float | None, float | None]]:
-    chart = payload.get("chart") or {}
-    results = chart.get("result") or []
-    if not results:
-        raise ValueError(f"Yahoo 응답에 {code} 데이터 없음: {chart.get('error')}")
-    result = results[0]
-    meta = result.get("meta") or {}
-    if str(meta.get("symbol", yahoo_kr_symbol(code))).upper() != yahoo_kr_symbol(code).upper():
-        raise ValueError(f"응답 symbol 불일치 ({meta.get('symbol')})")
-    if meta.get("dataGranularity", "1d") != "1d":
-        raise ValueError("일봉 이외 데이터 거부")
-    if (meta.get("exchangeTimezoneName") or "Asia/Seoul") != "Asia/Seoul":
-        raise ValueError("unexpected KRX timezone")
-    timestamps = result.get("timestamp") or []
-    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
-    closes = quote.get("close") or []
-    volumes = quote.get("volume") or [None] * len(timestamps)
-    if len(closes) != len(timestamps) or len(volumes) != len(timestamps):
-        raise ValueError("일봉 timestamp/close 길이 불일치")
-    values: dict[date, tuple[float | None, float | None]] = {}
-    for timestamp, close, volume in zip(timestamps, closes, volumes):
-        day = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(KST).date()
-        if day in values:
-            raise ValueError(f"중복 거래일 데이터 ({day})")
-        price = _positive(close)
-        # KRW prices are whole won; strip float32 noise.
-        values[day] = (None if price is None else float(round(price)), None if volume is None else float(volume))
-    return values
-
-
-def fetch_yahoo_kr_pair(code: str, previous_date: date, session_date: date, settings: Settings = SETTINGS) -> KrPair:
-    start, end = previous_date - timedelta(days=7), session_date + timedelta(days=2)
-    params = {
-        "period1": int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp()),
-        "period2": int(datetime(end.year, end.month, end.day, tzinfo=timezone.utc).timestamp()),
-        "interval": "1d", "includePrePost": "false", "events": "div,splits",
-    }
-    errors = []
-    for host in ("query1", "query2"):
-        try:
-            response = get_with_retry(f"https://{host}.finance.yahoo.com/v8/finance/chart/{yahoo_kr_symbol(code)}",
-                                      params=params, headers=YAHOO_HEADERS, settings=settings)
-            values = _parse_yahoo_kr(response.json(), code)
-        except Exception as exc:
-            errors.append(f"{host}: {exc}")
-            continue
-        previous, current = values.get(previous_date), values.get(session_date)
-        missing = [str(day) for day, item in ((previous_date, previous), (session_date, current))
-                   if item is None or item[0] is None]
-        if missing:
-            return KrPair(error=f"Yahoo(KRX) 필수 거래일 종가 누락 ({', '.join(missing)}; 최신 {max(values) if values else None})")
-        return KrPair(previous[0], current[0], current[1])
-    return KrPair(error="Yahoo(KRX) 조회 실패: " + " / ".join(errors))
-
-
-def fetch_naver_days(code: str, settings: Settings = SETTINGS, page_size: int = 10) -> dict[date, NaverDay]:
-    rows = _json(NAVER_PRICE_URL.format(code=code), {"page": 1, "pageSize": page_size}, settings)
-    if not isinstance(rows, list):
-        raise ValueError("Naver daily price response is not a list")
-    days: dict[date, NaverDay] = {}
-    for row in rows:
-        day = date.fromisoformat(str(row["localTradedAt"])[:10])
-        if day in days:
-            raise ValueError(f"Naver 중복 거래일 ({day})")
-        close, delta = _positive(row.get("closePrice")), _signed(row.get("compareToPreviousClosePrice"))
-        base = close - delta if close is not None and delta is not None else None
-        volume = _signed(row.get("accumulatedTradingVolume"))
-        days[day] = NaverDay(close, base if base and base > 0 else None, volume, _signed(row.get("fluctuationsRatio")))
-    return days
-
-
-def limit_note(change_pct: float) -> str | None:
-    """KOSPI's +-30% daily limit does not apply to 정리매매, new listings or
-    re-listings. Such moves are kept (recall first) but flagged for review."""
-    if abs(change_pct) > PRICE_LIMIT_PCT:
-        return f"가격제한폭(±30%) 초과 {change_pct:+.2f}%: 정리매매·신규/재상장·기준가 변경 여부 확인 필요"
-    return None
-
-
-def _krx_closes(client, day: date) -> dict[str, float]:
-    closes = {}
-    for row in client.rows("stk_bydd_trd", day):
-        raw = str(row.get("ISU_CD") or row.get("ISU_SRT_CD") or "")
-        code = raw[3:9] if len(raw) == 12 else raw
-        value = _positive(row.get("TDD_CLSPRC"))
-        if code and value is not None:
-            closes[code] = value
-    return closes
-
-
-def reconcile_kr(code: str, primary: KrPair, naver: dict[date, NaverDay] | None, naver_error: str | None,
-                 previous_date: date, session_date: date, threshold_pct: float) -> tuple[dict | None, str | None]:
-    """Combine Yahoo(KRX close) with Naver's KRX base price into one row."""
-    today = (naver or {}).get(session_date)
-    base = today.krx_base_price if today else None
-    notes: list[str] = []
-    # A stock with no trades at all keeps its KRX base price as the close.
-    if today and today.volume == 0 and base and today.integrated_close == base:
-        return {"previous_close": base, "close": base, "change_pct": 0.0, "volume": 0.0,
-                "source": "Naver 기준가(무거래)", "fallback": False, "mismatch": False, "cross_checked": True,
-                "validation": "무거래: 종가=기준가", "note": "거래 없음(거래정지 가능)"}, None
-    if primary.ok:
-        change = calculate_change_pct(primary.previous_close, primary.close)
-        row = {"previous_close": primary.previous_close, "close": primary.close, "change_pct": change,
-               "volume": primary.volume, "source": "Yahoo(KRX 정규장)", "fallback": False, "mismatch": False,
-               "cross_checked": False, "validation": "교차검증 불가"}
-        if base is None:
-            notes.append(f"Naver KRX 기준가 확인 불가: {naver_error or '분석일 행 없음'}")
-        elif base == primary.previous_close:
-            row.update(cross_checked=True, validation="Naver KRX 기준가 일치")
-        else:
-            other = calculate_change_pct(base, primary.close)
-            row.update(mismatch=True, cross_checked=True, alt_change_pct=other,
-                       validation=f"전일종가 불일치: Naver KRX 기준가 {base:,.0f} ({other:+.2f}%)")
-            notes.append(f"Yahoo 전일종가 {primary.previous_close:,.0f} ≠ KRX 기준가 {base:,.0f}: "
-                         "권리락·배당락 등 기준가 조정 또는 데이터 오류 가능")
-            yahoo_implausible = abs(change) > PRICE_LIMIT_PCT >= abs(other)
-            if yahoo_implausible or (is_drop(other, threshold_pct) and not is_drop(change, threshold_pct)):
-                row.update(previous_close=base, change_pct=other, source="Yahoo 종가 + Naver KRX 기준가")
-        if today and today.integrated_close and abs(today.integrated_close / primary.close - 1) > 0.05:
-            notes.append(f"Naver 통합(NXT 포함) 최종가 {today.integrated_close:,.0f}와 5% 이상 차이")
-    elif base and today.integrated_close:
-        # Fallback: KRX base price (exact previous regular close) + Naver's
-        # integrated last price, which can include NXT after-market trades.
-        row = {"previous_close": base, "close": today.integrated_close,
-               "change_pct": calculate_change_pct(base, today.integrated_close), "volume": today.volume,
-               "source": "Naver fallback(통합가 근사)", "fallback": True, "mismatch": False,
-               "cross_checked": False, "validation": "Yahoo(KRX) 실패 → Naver fallback"}
-        notes.extend([primary.error, "분석일 종가는 NXT 시간외 포함 가능 근사치"])
-    else:
-        return None, f"{primary.error} | Naver: {naver_error or ('분석일 행 없음' if today is None else 'KRX 기준가/종가 없음')}"
-    note = limit_note(row["change_pct"])
-    row["limit_exceeded"] = note is not None
-    if note:
-        notes.append(note)
-    row["note"] = "; ".join(notes)
-    return row, None
+def _xkrx_next_session(day: date) -> date | None:
+    sessions = [session for session in _xkrx_sessions(day, day + timedelta(days=20)) if session > day]
+    return sessions[0] if sessions else None
 
 
 def download_kospi_market_data(
@@ -422,9 +252,10 @@ def download_kospi_market_data(
 ) -> KrCollection:
     threshold_pct = settings.kr_drop_threshold_pct if threshold_pct is None else threshold_pct
     previous_date, session_date = context.previous_session_date, context.session_date
+    next_session = _xkrx_next_session(session_date)
     codes = constituents["code"].tolist()
     names = dict(zip(constituents["code"], constituents["company_name"]))
-    warnings: list[str] = []
+    notices: list[str] = []
     # Older manual sessions need more Naver history rows.
     page_size = 10 if (date.today() - session_date).days <= 7 else 60
 
@@ -432,79 +263,120 @@ def download_kospi_market_data(
         with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
             return dict(zip(symbols, executor.map(function, symbols)))
 
-    def naver_safe(code):
-        try:
-            return fetch_naver_days(code, settings, page_size), None
-        except Exception as exc:
-            return None, f"Naver daily 조회 실패: {exc}"
+    def fetch_yahoo(symbols):
+        return pool_map(lambda code: yahoo.fetch_kr(code, previous_date, session_date, settings), symbols)
 
     started = time.monotonic()
-    def fetch_yahoo(symbols):
-        return pool_map(lambda code: fetch_yahoo_kr_pair(code, previous_date, session_date, settings), symbols)
-
-    primary = retry_until_available(fetch_yahoo(codes), fetch_yahoo, lambda pair: pair.ok, settings, "[KR] Yahoo(KRX)")
+    # Availability is judged on the analysis-day close only: a missing previous
+    # close (e.g. halted the day before) is not "data not published yet".
+    primary = retry_until_available(fetch_yahoo(codes), fetch_yahoo, lambda o: o.close.usable, settings,
+                                    "[KR] Yahoo(KRX)")
     stage = time.monotonic()
-    naver = pool_map(naver_safe, codes)
-    LOGGER.info("[KR] Yahoo(KRX) %.1fs 유효 %d / %d, Naver 기준가 %.1fs 성공 %d", stage - started,
-                sum(pair.ok for pair in primary.values()), len(codes), time.monotonic() - stage,
-                sum(result[0] is not None for result in naver.values()))
-    if not any(result[0] is not None for result in naver.values()):
-        warnings.append("Naver KRX 기준가 교차검증 전체 불가")
+    daum_quotes = pool_map(lambda code: daum.fetch_quote(code, previous_date, session_date, next_session, settings),
+                           codes)
+    naver_rows = pool_map(lambda code: naver.fetch_daily(code, previous_date, session_date, settings, page_size,
+                                                         next_session), codes)
+    daum_status: dict[str, int] = {}
+    for observation, _state in daum_quotes.values():
+        daum_status[observation.close.status] = daum_status.get(observation.close.status, 0) + 1
+    LOGGER.info("[KR] Yahoo(KRX) %.1fs 양일 유효 %d / %d | Daum 분석일 종가 상태 %s | Naver 기준가 %d (%.1fs)",
+                stage - started, sum(o.close.usable and o.previous_close.usable for o in primary.values()), len(codes),
+                daum_status, sum(row[0].previous_close.usable for row in naver_rows.values()), time.monotonic() - stage)
 
-    krx_previous = krx_current = None
+    official: dict[str, PriceObservation] = {}
     if krx_client is not None:
         try:
-            krx_previous, krx_current = _krx_closes(krx_client, previous_date), _krx_closes(krx_client, session_date)
-            LOGGER.info("[KR] KRX 공식 종가 교차검증 사용: %d / %d 종목", len(krx_current), len(codes))
+            official = krx_official.observations(krx_client, codes, previous_date, session_date)
+            LOGGER.info("[KR] KRX 공식 종가 교차검증 사용: %d 종목", len(official))
         except Exception as exc:
-            warnings.append(f"KRX 공식 교차검증 불가: {exc}")
+            notices.append(f"KRX 공식 교차검증 불가: {exc}")
             LOGGER.warning("[KR] KRX 공식 교차검증 불가: %s", exc)
+
+    def observations_for(code: str, extra: list[PriceObservation]) -> list[PriceObservation]:
+        quote, state = daum_quotes[code]
+        naver_observation, naver_day, naver_next = naver_rows[code]
+        # The integrated close equals the KRX close when the stock has no NXT
+        # trading, or when nothing traded at all (close == base, volume 0).
+        if state is not None and state.nxt_tradable is False:
+            naver_observation = naver.as_regular(naver_observation, "비NXT 종목")
+            extra = [naver.as_regular(item, "비NXT 종목") for item in extra]
+        no_trade = bool(naver_day and naver_day.volume == 0 and naver_day.integrated_close == naver_day.krx_base_price)
+        if no_trade:
+            if naver_observation.close.session_type != "REGULAR":
+                naver_observation = naver.as_regular(naver_observation, "무거래")
+            # A day without trades keeps the base price: when Daum's KRX close for the
+            # day independently equals that base, it also confirms the previous close.
+            if quote.close.usable and quote.close.value == naver_day.krx_base_price:
+                quote = replace(quote, source=f"{quote.source}·무거래",
+                                previous_close=FieldValue(quote.close.value, previous_date, OK))
+            # KRX rule: without trades the close is the base price. When Yahoo's own
+            # previous close independently equals Naver's base, that confirms the close.
+            yahoo_previous = primary[code].previous_close
+            if yahoo_previous.usable and yahoo_previous.value == naver_day.krx_base_price:
+                extra = [*extra, PriceObservation(code, "무거래 규칙(Yahoo 전일종가=KRX 기준가)",
+                                                  close=FieldValue(yahoo_previous.value, session_date, OK),
+                                                  previous_close=FieldValue(status=NOT_PROVIDED))]
+        observations = [primary[code], quote, naver_observation, *([naver_next] if naver_next else []), *extra]
+        if code in official:
+            observations.append(official[code])
+        return observations
+
+    # Confirm previous closes that do not yet have two agreeing sources.
+    def needs_days(code: str) -> bool:
+        values = [o.previous_close.value for o in observations_for(code, []) if o.previous_close.usable]
+        return not any(values.count(value) >= 2 for value in values) or not primary[code].close.usable
+
+    on_demand = [code for code in codes if needs_days(code)]
+    daum_days = pool_map(lambda code: daum.fetch_days(code, previous_date, session_date, settings), on_demand)
+    if on_demand:
+        LOGGER.info("[KR] Daum 일별 기준가 추가 조회 %d종목", len(on_demand))
 
     records, missing = [], {}
     for code in codes:
-        days, naver_error = naver[code]
-        row, reason = reconcile_kr(code, primary[code], days, naver_error, previous_date, session_date, threshold_pct)
-        if row is None:
-            missing[code] = reason
+        observations = observations_for(code, [daum_days[code]] if code in daum_days else [])
+        assessment = assess(code, observations, primary=yahoo.SOURCE, tolerance=PRICE_TOLERANCE_KRW,
+                            threshold_pct=threshold_pct, validation_band_pct=settings.kr_validation_band_pct,
+                            authoritative=krx_official.SOURCE if official else None)
+        if not assessment.valid:
+            missing[code] = assessment.reason
             continue
-        if krx_current is not None:
-            official = (krx_previous.get(code), krx_current.get(code))
-            if None not in official:
-                if official == (row["previous_close"], row["close"]):
-                    row["validation"] = (row["validation"] + " · KRX 공식 일치").strip(" ·")
-                else:
-                    other = calculate_change_pct(*official)
-                    row["mismatch"] = True
-                    row["alt_change_pct"] = other
-                    row["note"] = "; ".join(filter(None, [row["note"], f"KRX 공식 {official[0]:,.0f}→{official[1]:,.0f} ({other:+.2f}%)"]))
-                    if is_drop(other, threshold_pct) and not is_drop(row["change_pct"], threshold_pct):
-                        row.update(previous_close=official[0], close=official[1], change_pct=other, source="KRX 공식")
-        if validator is not None and is_drop(row["change_pct"], threshold_pct):
+        quote, state = daum_quotes[code]
+        naver_day = naver_rows[code][1]
+        base = (naver_day.krx_base_price if naver_day and naver_day.krx_base_price
+                else quote.previous_close.value if quote.previous_close.usable else None)
+        move = assess_kr_move(assessment.previous_close, assessment.close, base, state, session_date)
+        row = asdict(assessment)
+        notes = row.pop("notes")
+        if move.note:
+            notes.append(move.note)
+        no_trade = bool(naver_day and naver_day.volume == 0 and naver_day.integrated_close == naver_day.krx_base_price)
+        if no_trade and row["validation_status"] == "FALLBACK_VALIDATED" and row["change_pct"] == 0:
+            # Yahoo prints no bar for a day without trades; the close is the base
+            # price by exchange rule, confirmed by two sources: not a fallback.
+            row.update(fallback=False, validation="무거래(종가=기준가) 교차검증", severity=NORMAL)
+        if move.label == SPECIAL_TRADING_VALIDATED and row["severity"] == NORMAL:
+            row["severity"] = INFO
+        elif move.label == SPECIAL_TRADING_UNCONFIRMED:
+            row["severity"] = WARNING
+        row.update(note="; ".join(notes), outliers="; ".join(row["outliers"]),
+                   stale_sources=",".join(row["stale_sources"]), special_label=move.label,
+                   special_note=move.note, special_reasons=", ".join(move.reasons),
+                   krx_base_price=base, nxt_tradable=None if state is None else state.nxt_tradable)
+        if validator is not None and row["detected"]:
             try:
                 validator.validate(code, previous_date, session_date, row["previous_close"], row["close"])
-                row["validation"] = (row["validation"] + " · KIS 일치").strip(" ·")
+                row["validation"] += " · KIS 일치"
             except Exception as exc:
                 row["mismatch"] = True
+                row["severity"] = WARNING
                 row["note"] = "; ".join(filter(None, [row["note"], f"KIS 검증: {exc}"]))
         records.append({"code": code, "company_name": names[code], "session_date": session_date,
                         "previous_session_date": previous_date, **row})
 
     prices = pd.DataFrame(records)
-    if not prices.empty:
-        prices["detected"] = prices["change_pct"].map(lambda value: is_drop(value, threshold_pct))
-    collection = KrCollection(
-        prices=prices, missing=missing, warnings=warnings,
+    return KrCollection(
+        prices=prices, missing=missing, notices=notices,
         fallback_count=int(prices["fallback"].sum()) if not prices.empty else 0,
         mismatch_count=int(prices["mismatch"].sum()) if not prices.empty else 0,
         cross_checked_count=int(prices["cross_checked"].sum()) if not prices.empty else 0,
     )
-    if not prices.empty:
-        band = prices["change_pct"] <= settings.kr_validation_band_pct
-        unverified = prices.loc[band & ~prices["cross_checked"] & ~prices["fallback"]]
-        if len(unverified):
-            collection.warnings.append(f"검증 구간({settings.kr_validation_band_pct:.0f}%) 이하 {len(unverified)}개 2차 검증 불가: "
-                                       + ", ".join(unverified["code"]))
-        beyond = prices.loc[prices["detected"] & prices["limit_exceeded"]]
-        if len(beyond):
-            collection.warnings.append(f"가격제한폭 초과 급락 {len(beyond)}개 확인 필요: " + ", ".join(beyond["code"]))
-    return collection

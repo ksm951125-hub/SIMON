@@ -4,7 +4,7 @@ import pandas as pd
 
 from news import fetch_news
 from market_calendar import KST
-from market_result import MarketResult
+from market_result import Issue, MarketResult
 from report import (
     build_combined_subject,
     build_html_report,
@@ -63,13 +63,13 @@ def test_zero_drop_report_is_explicit():
 def test_combined_zero_drop_email_is_explicit():
     us = MarketResult(
         market="US", title="S&P 500 급락 모니터", threshold_pct=-10.0,
-        code_column="ticker", currency="USD", status="OK",
+        code_column="ticker", currency="USD", status="NORMAL",
         session_date=date(2026, 9, 24), previous_session_date=date(2026, 9, 23),
         total_count=503, analyzed_count=503,
     )
     kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="OK",
+        code_column="code", currency="KRW", status="NORMAL",
         session_date=date(2026, 9, 23), previous_session_date=date(2026, 9, 22),
         total_count=944, analyzed_count=944,
     )
@@ -86,11 +86,11 @@ def test_combined_zero_drop_email_is_explicit():
 def test_combined_data_warning_does_not_claim_zero():
     us = MarketResult(
         market="US", title="S&P 500 급락 모니터", threshold_pct=-10.0,
-        code_column="ticker", currency="USD", status="OK", total_count=503, analyzed_count=503,
+        code_column="ticker", currency="USD", status="NORMAL", total_count=503, analyzed_count=503,
     )
     kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="FAILED",
+        code_column="code", currency="KRW", status="ERROR",
         total_count=944, analyzed_count=100, error="simulated outage",
     )
 
@@ -98,8 +98,8 @@ def test_combined_data_warning_does_not_claim_zero():
     subject = build_combined_subject(us, kr)
 
     assert "Detected: 확인 필요" in markdown
-    assert "DATA FAILED" in markdown
-    assert "[FAILED KR]" in subject
+    assert "DATA ERROR" in markdown
+    assert "[ERROR KR]" in subject
     assert "KOSPI 확인필요" in subject
 
 
@@ -126,7 +126,7 @@ def _candidates(market: str, count: int) -> pd.DataFrame:
 def test_html_report_candidates_warning_and_long_korean_name():
     us = MarketResult(
         market="US", title="S&P 500 급락 모니터", threshold_pct=-10.0,
-        code_column="ticker", currency="USD", status="OK",
+        code_column="ticker", currency="USD", status="NORMAL",
         session_date=date(2026, 9, 24), previous_session_date=date(2026, 9, 23),
         total_count=503, analyzed_count=503, candidates=_candidates("US", 3),
     )
@@ -139,13 +139,15 @@ def test_html_report_candidates_warning_and_long_korean_name():
             "0220W0 한화머시너리앤서비스홀딩스": "required sessions missing (2026-06-04, 2026-06-05)",
             "0220WL 한화머시너리앤서비스홀딩스3우B": "required sessions missing (2026-06-04, 2026-06-05)",
         },
+        issues=[Issue("WARNING", "MISSING", "required sessions missing", "0220W0", "한화머시너리앤서비스홀딩스"),
+                Issue("WARNING", "MISSING", "required sessions missing", "0220WL", "한화머시너리앤서비스홀딩스3우B")],
     )
 
     html = build_html_report(us, kr, datetime(2026, 9, 25, 8, tzinfo=KST))
 
     assert "multipart" not in html
     assert "&#9888; WARNING" in html
-    assert "데이터 누락·경고 · 2건" in html
+    assert "DATA WARNING · 2건" in html and "데이터 누락 2건" in html
     assert "외 27개 종목 (전체 목록)" in html
     assert html.count("&#9660;&nbsp;") == 40
     assert "매우 긴 한글 회사명 주식회사 글로벌 테스트 홀딩스" in html
@@ -160,14 +162,14 @@ def test_html_report_candidates_warning_and_long_korean_name():
 def test_html_report_zero_candidates_has_no_warning_card():
     us = MarketResult(
         market="US", title="S&P 500 급락 모니터", threshold_pct=-10.0,
-        code_column="ticker", currency="USD", status="OK", total_count=503, analyzed_count=503,
+        code_column="ticker", currency="USD", status="NORMAL", total_count=503, analyzed_count=503,
     )
     kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="OK", total_count=944, analyzed_count=944,
+        code_column="code", currency="KRW", status="NORMAL", total_count=944, analyzed_count=944,
     )
 
     html = build_html_report(us, kr, datetime(2026, 9, 25, 8, tzinfo=KST))
 
     assert html.count("기준 이하 급락 종목 없음") == 2
-    assert "데이터 누락·경고 ·" not in html
+    assert "DATA WARNING" not in html

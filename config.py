@@ -31,6 +31,10 @@ class Settings:
     availability_min_ratio: float = 0.90
     availability_retries: int = 2
     availability_wait_seconds: float = 60.0
+    # Nasdaq throttles one IP after ~200 quick requests: pace its calls. Normally
+    # only a handful are needed (CNBC confirms most symbols); ~2 minutes if CNBC
+    # is down and all 503 symbols must be checked.
+    nasdaq_min_interval_seconds: float = 0.25
 
     # Status policy (see market_result.classify_status).
     failed_coverage_ratio: float = 0.90

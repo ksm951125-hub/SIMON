@@ -48,11 +48,11 @@ def test_market_failures_are_isolated_in_combined_report(monkeypatch, failed_mar
     )
     ok_us = MarketResult(
         market="US", title="S&P 500 급락 모니터", threshold_pct=-10.0,
-        code_column="ticker", currency="USD", status="OK", total_count=503, analyzed_count=503,
+        code_column="ticker", currency="USD", status="NORMAL", total_count=503, analyzed_count=503,
     )
     ok_kr = MarketResult(
         market="KR", title="KOSPI 급락 모니터", threshold_pct=-7.0,
-        code_column="code", currency="KRW", status="OK", total_count=944, analyzed_count=944,
+        code_column="code", currency="KRW", status="NORMAL", total_count=944, analyzed_count=944,
     )
     monkeypatch.setattr(
         main,
@@ -78,6 +78,6 @@ def test_market_failures_are_isolated_in_combined_report(monkeypatch, failed_mar
 
     assert main.run(args) == 1
     assert f"{failed_market} outage" in captured["plain_text"]
-    assert "상태: OK" in captured["plain_text"]
-    assert "상태: FAILED" in captured["plain_text"]
+    assert "상태: NORMAL" in captured["plain_text"]
+    assert "상태: ERROR" in captured["plain_text"]
     assert f"{failed_market} outage" in captured["html"]

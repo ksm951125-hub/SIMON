@@ -17,7 +17,8 @@ from kis_validation import optional_validator
 from kospi import download_kospi_market_data, get_kospi_session_context, load_kospi_constituents
 from market_calendar import DATA_READY_DELAY, KST, SessionContext, get_session_context
 from market_data import download_market_data
-from market_result import FAILED, SKIPPED, MarketResult, classify_status, count_critical_mismatches
+from market_result import (ERROR, INFO, SKIPPED, WARNING, Issue, MarketResult, classify_status,
+                           issues_from_prices)
 from news import fetch_news
 from notifier import NotificationError, send_gmail_email
 from report import build_combined_subject, build_html_report, build_plain_text_report
@@ -25,7 +26,7 @@ from runtime import execute_market
 from sp500 import load_constituents
 
 LOGGER = logging.getLogger("drop_monitor")
-REPORT_SCHEMA = "regular-close-v3"
+REPORT_SCHEMA = "regular-close-v4"
 US_TITLE, KR_TITLE = "S&P 500 급락 모니터", "KOSPI 급락 모니터"
 
 
@@ -67,16 +68,28 @@ def _log_rows(market: str, label: str, frame: pd.DataFrame, code_column: str) ->
 
 
 def _log_summary(result: MarketResult, candidate_count: int) -> None:
+    statuses = (result.prices["validation_status"].value_counts().to_dict()
+                if not result.prices.empty and "validation_status" in result.prices else {})
     LOGGER.info(
         "[%s] SUMMARY analysis_date=%s previous_trading_date=%s listing_count=%d valid_price_count=%d "
-        "missing_price_count=%d fallback_count=%d mismatch_count=%d cross_checked=%d candidate_count=%d "
-        "final_alert_count=%d coverage=%.2f%% status=%s",
+        "missing_price_count=%d fallback_count=%d mismatch_count=%d cross_validated=%d candidate_count=%d "
+        "final_alert_count=%d coverage=%.2f%% status=%s validation=%s",
         result.market, result.session_date, result.previous_session_date, result.total_count,
         result.analyzed_count, result.missing_count, result.fallback_count, result.mismatch_count,
         result.cross_checked_count, candidate_count, len(result.candidates), result.coverage * 100, result.status,
+        statuses,
     )
-    for warning in result.warnings:
-        LOGGER.warning("[%s] WARNING %s", result.market, warning)
+    for issue in result.issues:
+        log = LOGGER.warning if issue.is_data_warning else LOGGER.info
+        log("[%s] %s %s %s %s | %s", result.market, issue.level, issue.category, issue.symbol, issue.name, issue.message)
+    for note in result.source_notes:
+        LOGGER.info("[%s] SOURCE %s", result.market, note)
+
+
+def _missing_issues(missing: dict[str, str], names: dict[str, str]) -> tuple[dict[str, str], list[Issue]]:
+    keyed = {f"{code} {names.get(code, '')}".strip(): reason for code, reason in sorted(missing.items())}
+    issues = [Issue(WARNING, "MISSING", reason, code, names.get(code, "")) for code, reason in sorted(missing.items())]
+    return keyed, issues
 
 
 def run_us_monitor(session_date: date | None) -> MarketResult:
@@ -88,18 +101,16 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
     collection = download_market_data(constituents, context.session_date, context.previous_session_date)
     prices = collection.prices
 
-    warnings = list(collection.warnings)
-    if constituents.attrs.get("warning"):
-        warnings.append(constituents.attrs["warning"])
-    notices = [f"미국 휴장/데이터 미확정: {context.reason}"] if context.reason else []
-    notices += collection.notices
-    if session_date:
-        notices.append("수동 지정일 분석: 현재 S&P500 구성종목 기준(당시 편입 목록 아님)")
-
     names = constituents.set_index("yahoo_ticker")["company_name"].to_dict()
-    missing = {f"{ticker} {names.get(ticker, '')}".strip(): reason for ticker, reason in sorted(collection.missing.items())}
-    for key, reason in missing.items():
-        LOGGER.warning("[US] MISSING %s | %s", key, reason)
+    missing, issues = _missing_issues(collection.missing, names)
+    price_issues, price_notes = issues_from_prices(prices, "ticker", SETTINGS.us_validation_band_pct)
+    issues += price_issues
+    if constituents.attrs.get("warning"):
+        issues.append(Issue(WARNING, "LISTING", constituents.attrs["warning"]))
+    if context.reason:
+        issues.append(Issue(INFO, "CALENDAR", f"미국 휴장/데이터 미확정: {context.reason}"))
+    if session_date:
+        issues.append(Issue(INFO, "NOTICE", "수동 지정일 분석: 현재 S&P500 구성종목 기준(당시 편입 목록 아님)"))
 
     band = prices.loc[prices["change_pct"] <= SETTINGS.us_validation_band_pct] if not prices.empty else prices
     _log_rows("US", "CANDIDATE", band.sort_values("change_pct") if not band.empty else band, "ticker")
@@ -112,18 +123,14 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
 
     result = MarketResult(
         market="US", title=US_TITLE, threshold_pct=SETTINGS.drop_threshold_pct, code_column="ticker",
-        currency="USD", source="Yahoo 정규장 일봉 + Nasdaq 교차검증", prices=prices,
+        currency="USD", source="Yahoo 정규장 일봉 · 교차검증 Nasdaq/CNBC", prices=prices,
         session_date=context.session_date, previous_session_date=context.previous_session_date,
         total_count=len(constituents), analyzed_count=len(prices), candidates=candidates, missing=missing,
         fallback_count=collection.fallback_count, mismatch_count=collection.mismatch_count,
-        cross_checked_count=collection.cross_checked_count, warnings=warnings,
-        error="; ".join(warnings) or None,
-        notice=" · ".join(notices) or None,
+        cross_checked_count=collection.cross_checked_count, issues=issues,
+        source_notes=collection.notices + price_notes,
     )
-    result.status = classify_status(result.total_count, result.analyzed_count, missing_count=len(missing),
-                                    fallback_count=result.fallback_count,
-                                    mismatch_count=count_critical_mismatches(prices, SETTINGS.us_validation_band_pct),
-                                    warnings=warnings)
+    result.status = classify_status(result.total_count, result.analyzed_count, issues)
     _log_summary(result, len(band))
     return result
 
@@ -147,13 +154,13 @@ def run_kr_monitor(session_date: date | None) -> MarketResult:
                                             validator=optional_validator())
     prices = collection.prices
 
-    warnings = list(constituents.attrs.get("warnings", [])) + list(collection.warnings)
-    if context.warning:
-        warnings.append(context.warning)
     names = dict(zip(constituents["code"], constituents["company_name"]))
-    missing = {f"{code} {names.get(code, '')}".strip(): reason for code, reason in sorted(collection.missing.items())}
-    for key, reason in missing.items():
-        LOGGER.warning("[KR] MISSING %s | %s", key, reason)
+    missing, issues = _missing_issues(collection.missing, names)
+    price_issues, price_notes = issues_from_prices(prices, "code", SETTINGS.kr_validation_band_pct)
+    issues += price_issues
+    issues += [Issue(WARNING, "LISTING", warning) for warning in constituents.attrs.get("warnings", [])]
+    if context.warning:
+        issues.append(Issue(context.warning_level, "CALENDAR", context.warning))
 
     band = prices.loc[prices["change_pct"] <= SETTINGS.kr_validation_band_pct] if not prices.empty else prices
     _log_rows("KR", "CANDIDATE", band.sort_values("change_pct") if not band.empty else band, "code")
@@ -161,18 +168,15 @@ def run_kr_monitor(session_date: date | None) -> MarketResult:
                   if not prices.empty else pd.DataFrame())
     result = MarketResult(
         market="KR", title=KR_TITLE, threshold_pct=SETTINGS.kr_drop_threshold_pct, code_column="code",
-        currency="KRW", source="Yahoo(KRX 정규장 종가) + Naver KRX 기준가 교차검증" + (" + KRX 공식" if _has_krx() else ""),
-        prices=prices,
-        session_date=context.session_date, previous_session_date=context.previous_session_date,
+        currency="KRW",
+        source="Yahoo KRX 정규장 종가 · 교차검증 Daum/Naver KRX 기준가" + (" · KRX 공식" if _has_krx() else ""),
+        prices=prices, session_date=context.session_date, previous_session_date=context.previous_session_date,
         total_count=len(constituents), analyzed_count=len(prices), candidates=candidates, missing=missing,
         fallback_count=collection.fallback_count, mismatch_count=collection.mismatch_count,
-        cross_checked_count=collection.cross_checked_count, warnings=warnings,
-        error="; ".join(warnings) or None,
+        cross_checked_count=collection.cross_checked_count, issues=issues,
+        source_notes=collection.notices + price_notes,
     )
-    result.status = classify_status(result.total_count, result.analyzed_count, missing_count=len(missing),
-                                    fallback_count=result.fallback_count,
-                                    mismatch_count=count_critical_mismatches(prices, SETTINGS.kr_validation_band_pct),
-                                    warnings=warnings)
+    result.status = classify_status(result.total_count, result.analyzed_count, issues)
     _log_summary(result, len(band))
     return result
 
@@ -187,7 +191,8 @@ def _failed_result(market: str, exc: Exception) -> MarketResult:
         (US_TITLE, SETTINGS.drop_threshold_pct, "ticker", "USD") if market == "US"
         else (KR_TITLE, SETTINGS.kr_drop_threshold_pct, "code", "KRW"))
     return MarketResult(market=market, title=title, threshold_pct=threshold, code_column=column,
-                        currency=currency, status=FAILED, error=f"{type(exc).__name__}: {exc}")
+                        currency=currency, status=ERROR, error=f"{type(exc).__name__}: {exc}",
+                        issues=[Issue(ERROR, "SOURCE", f"{type(exc).__name__}: {exc}")])
 
 
 def _skipped_result(market: str) -> MarketResult:
@@ -215,7 +220,8 @@ def _write_outputs(us: MarketResult, kr: MarketResult, plain_text: str, html: st
             "listing": result.total_count, "valid": result.analyzed_count, "coverage": result.coverage,
             "fallback": result.fallback_count, "mismatch": result.mismatch_count,
             "cross_checked": result.cross_checked_count, "threshold": result.threshold_pct,
-            "detected": len(result.candidates), "missing": result.missing, "warnings": result.warnings,
+            "detected": len(result.candidates), "missing": result.missing,
+            "issues": [issue.__dict__ for issue in result.issues], "source_notes": result.source_notes,
             "error": result.error, "source": result.source,
             "candidates": _records(result.candidates.drop(columns=["news_items"], errors="ignore")),
             "prices": _records(result.prices),
@@ -262,9 +268,9 @@ def run(args: argparse.Namespace) -> int:
     else:
         LOGGER.info("dry-run/알림 비활성: 이메일 전송 안 함")
     LOGGER.info("Total elapsed=%.2fs", time.monotonic() - started)
-    # Only a market-wide failure marks the workflow run as failed; WARNING
+    # Only a market-wide ERROR marks the workflow run as failed; INFO/WARNING
     # results are complete, flagged reports.
-    return 1 if any(item.status == FAILED for item in (us, kr)) else 0
+    return 1 if any(item.status == ERROR for item in (us, kr)) else 0
 
 
 def main() -> int:
@@ -283,7 +289,7 @@ def main() -> int:
                 prefix = "[TEST] " if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" else ""
                 send_gmail_email(
                     f"US + KOSPI 급락 모니터 실행이 실패했습니다.\n\n오류: {type(exc).__name__}: {exc}\n",
-                    f"{prefix}[급락 모니터][FAILED] 실행 실패",
+                    f"{prefix}[급락 모니터][ERROR] 실행 실패",
                 )
                 LOGGER.info("실패 알림 Gmail 전송: 완료")
             except Exception:

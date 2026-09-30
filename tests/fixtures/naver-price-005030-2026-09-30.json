@@ -1,0 +1,152 @@
+[
+ {
+  "localTradedAt": "2026-09-30",
+  "closePrice": "44",
+  "compareToPreviousClosePrice": "7",
+  "compareToPreviousPrice": {
+   "code": "2",
+   "text": "상승",
+   "name": "RISING"
+  },
+  "fluctuationsRatio": "18.92",
+  "openPrice": "46",
+  "highPrice": "62",
+  "lowPrice": "44",
+  "accumulatedTradingVolume": 26482549
+ },
+ {
+  "localTradedAt": "2026-09-29",
+  "closePrice": "37",
+  "compareToPreviousClosePrice": "-449",
+  "compareToPreviousPrice": {
+   "code": "5",
+   "text": "하락",
+   "name": "FALLING"
+  },
+  "fluctuationsRatio": "-92.39",
+  "openPrice": "26",
+  "highPrice": "50",
+  "lowPrice": "23",
+  "accumulatedTradingVolume": 28872090
+ },
+ {
+  "localTradedAt": "2026-09-28",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-23",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-22",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-21",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-18",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-17",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-16",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ },
+ {
+  "localTradedAt": "2026-09-15",
+  "closePrice": "486",
+  "compareToPreviousClosePrice": "0",
+  "compareToPreviousPrice": {
+   "code": "3",
+   "text": "보합",
+   "name": "UNCHANGED"
+  },
+  "fluctuationsRatio": "0.00",
+  "openPrice": "0",
+  "highPrice": "0",
+  "lowPrice": "0",
+  "accumulatedTradingVolume": 0
+ }
+]

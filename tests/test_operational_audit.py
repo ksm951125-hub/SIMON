@@ -49,7 +49,7 @@ def test_smtp_ambiguous_failure_is_not_retried(monkeypatch):
     args = Namespace(notify=True, dry_run=False, market="all", session_date_us=None, session_date_kr=None)
     monkeypatch.setattr(main, "_parse_args", lambda: args)
     result = MarketResult(market="US", title="Test", threshold_pct=-10, code_column="ticker", currency="USD",
-                          status="OK", total_count=1, analyzed_count=1)
+                          status="NORMAL", total_count=1, analyzed_count=1)
     monkeypatch.setattr(main, "execute_market", lambda *args: result)
     monkeypatch.setattr(main, "_write_outputs", lambda *args: None)
     calls = []

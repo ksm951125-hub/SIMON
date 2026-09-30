@@ -1,0 +1,131 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "FICO",
+     "exchangeName": "NYQ",
+     "fullExchangeName": "NYSE",
+     "instrumentType": "EQUITY",
+     "firstTradeDate": 553959000,
+     "regularMarketTime": 1790712003,
+     "hasPrePostMarketData": true,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 617.87,
+     "regularMarketChangePercent": -26.522,
+     "fulldayPrice": 615.0,
+     "fulldayChange": -1.85,
+     "fulldayChangePercent": -0.3,
+     "fiftyTwoWeekHigh": 1998.01,
+     "fiftyTwoWeekLow": 595.19,
+     "regularMarketDayHigh": 685.0,
+     "regularMarketDayLow": 595.19,
+     "regularMarketVolume": 4895965,
+     "longName": "Fair Isaac Corporation",
+     "shortName": "Fair Isaac Corporation",
+     "chartPreviousClose": 949.68,
+     "priceHint": 2,
+     "currentTradingPeriod": {
+      "pre": {
+       "timezone": "EDT",
+       "end": 1790775000,
+       "start": 1790755200,
+       "gmtoffset": -14400
+      },
+      "regular": {
+       "timezone": "EDT",
+       "end": 1790798400,
+       "start": 1790775000,
+       "gmtoffset": -14400
+      },
+      "post": {
+       "timezone": "EDT",
+       "end": 1790812800,
+       "start": 1790798400,
+       "gmtoffset": -14400
+      }
+     },
+     "dataGranularity": "1d",
+     "range": "",
+     "validRanges": [
+      "1d",
+      "5d",
+      "1mo",
+      "3mo",
+      "6mo",
+      "1y",
+      "2y",
+      "5y",
+      "10y",
+      "ytd",
+      "max"
+     ]
+    },
+    "timestamp": [
+     1789997400,
+     1790083800,
+     1790170200,
+     1790256600,
+     1790343000,
+     1790602200,
+     1790688600
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "volume": [
+        487400,
+        342000,
+        501800,
+        502100,
+        387400,
+        394300,
+        4902800
+       ],
+       "open": [
+        964.1900024414062,
+        937.1500244140625,
+        910.0,
+        888.1199951171875,
+        857.0,
+        852.8599853515625,
+        668.0800170898438
+       ],
+       "close": [
+        924.52001953125,
+        914.47998046875,
+        879.6199951171875,
+        856.47998046875,
+        863.0900268554688,
+        840.8900146484375,
+        617.8699951171875
+       ],
+       "high": [
+        967.989990234375,
+        941.969970703125,
+        916.0499877929688,
+        892.8499755859375,
+        870.0,
+        853.5499877929688,
+        685.0
+       ],
+       "low": [
+        921.02001953125,
+        909.1599731445312,
+        875.4500122070312,
+        855.0,
+        848.6400146484375,
+        832.0,
+        595.1900024414062
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

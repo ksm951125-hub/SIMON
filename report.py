@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from market_result import FAILED, OK, SKIPPED, WARNING, MarketResult
+from market_result import CATEGORY_TEXT, ERROR, INFO, NORMAL, SKIPPED, WARNING, Issue, MarketResult
 
 MAX_WARNING_ITEMS = 30
 
@@ -29,7 +29,7 @@ def _date_text(value: date | None) -> str:
 def _detection_text(result: MarketResult) -> str:
     if result.status == SKIPPED:
         return "제외"
-    if result.status == FAILED:
+    if result.status == ERROR:
         return f"{len(result.candidates)}개 (불완전)" if not result.candidates.empty else "확인 필요"
     return f"{len(result.candidates)}개"
 
@@ -51,25 +51,33 @@ def _source_text(row: pd.Series, result: MarketResult) -> str:
     return f"{source} · {validation}" if isinstance(validation, str) and validation else source
 
 
+STATUS_TAGS = {
+    "CROSS_VALIDATED": "✓", "FALLBACK_VALIDATED": "대체✓", "PRIMARY_ONLY": "단일",
+    "FALLBACK_UNVERIFIED": "대체·미검증", "CROSS_SOURCE_MISMATCH": "불일치",
+}
+
+
 def _source_tag(row: pd.Series, result: MarketResult) -> str:
-    """Compact source label for the mail table; details live in the note line."""
+    """Compact validation label for the mail table; details live in the note line."""
     source = str(row.get("source") or result.source)
-    short = source.split("(")[0].split(" ")[0] or source
-    if bool(row.get("fallback", False)):
-        return f"{short}(대체)"
-    if bool(row.get("mismatch", False)):
-        return f"{short}·불일치"
-    if bool(row.get("cross_checked", False)):
-        return f"{short}✓"
-    return short
+    short = source.split("+")[0].split("(")[0].split(" ")[0] or source
+    tag = STATUS_TAGS.get(row.get("validation_status"), "")
+    label = f"{short}{tag}" if tag == "✓" else f"{short} {tag}".strip()
+    if row.get("special_label") == "SPECIAL_TRADING_VALIDATED":
+        label += " · 특수거래"
+    return label
 
 
 def _status_message(result: MarketResult) -> str | None:
-    if result.status == FAILED:
-        return "DATA FAILED: 시장 전체 결과를 신뢰할 수 없습니다. 누락 종목에 급락이 존재할 수 있습니다."
+    """Wording derived from the actual issue causes; None when nothing to say."""
+    if result.status == ERROR:
+        causes = result.causes((ERROR, WARNING))
+        return ("DATA ERROR: 시장 전체 결과를 신뢰할 수 없습니다. 누락 종목에 급락이 존재할 수 있습니다."
+                + (f" 원인: {', '.join(causes)}" if causes else ""))
     if result.status == WARNING:
-        return ("DATA WARNING: 일부 데이터 누락·대체·불일치가 있습니다. 검증된 종목 기준 결과이며 "
-                "누락 종목은 아래 목록을 확인하세요.")
+        return "DATA WARNING: " + ", ".join(result.causes((ERROR, WARNING))) + " — 아래 항목을 확인하세요."
+    if result.status == INFO:
+        return "참고(정상 처리): " + ", ".join(result.causes((INFO,)))
     return None
 
 
@@ -87,13 +95,16 @@ def build_plain_text_report(us: MarketResult, kr: MarketResult, executed_at_kst:
         ])
         lines.extend(f"{label}: {value}" for label, value in _metrics(result))
         lines.append(f"Source: {result.source}")
-        if result.notice:
-            lines.append(f"참고: {result.notice}")
+        lines.append(f"교차검증 완료: {result.cross_checked_count:,} / {result.analyzed_count:,} · 소스 불일치: {result.mismatch_count}")
+        lines.extend(f"소스 참고: {note}" for note in result.source_notes)
         message = _status_message(result)
         if message:
             lines.append(message)
-        if result.error:
-            lines.append(f"오류/경고: {result.error}")
+        for issue in result.issues:
+            target = f"{issue.symbol} {issue.name}".strip() + ": " if issue.symbol else ""
+            lines.append(f"- [{issue.level}] {target}{issue.message}")
+        if result.error and not result.issues:
+            lines.append(f"오류: {result.error}")
         lines.append("")
 
         if not result.candidates.empty:
@@ -111,12 +122,8 @@ def build_plain_text_report(us: MarketResult, kr: MarketResult, executed_at_kst:
             for code, note in notes:
                 if isinstance(note, str) and note:
                     lines.append(f"  * {code}: {note}")
-        elif result.status in {OK, WARNING}:
+        elif result.status in {NORMAL, INFO, WARNING}:
             lines.append("기준 이하 급락 종목 없음")
-
-        if result.missing:
-            lines.extend(["", f"데이터 누락 ({len(result.missing)}건):"])
-            lines.extend(f"- {code}: {reason}" for code, reason in sorted(result.missing.items()))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -132,13 +139,15 @@ def _html_price(value: float, currency: str) -> str:
 
 
 def _status_style(status: str) -> tuple[str, str, str]:
-    if status == OK:
-        return "&#9679; OK", "#166534", "#dcfce7"
+    if status == NORMAL:
+        return "&#9679; NORMAL", "#166534", "#dcfce7"
+    if status == INFO:
+        return "&#8505; INFO", "#1e40af", "#dbeafe"
     if status == WARNING:
         return "&#9888; WARNING", "#9a3412", "#ffedd5"
     if status == SKIPPED:
         return "&#8212; SKIPPED", "#475569", "#e2e8f0"
-    return "&#9888; FAILED", "#991b1b", "#fee2e2"
+    return "&#9888; ERROR", "#991b1b", "#fee2e2"
 
 
 def _summary_cell(label: str, value: str, width: str) -> str:
@@ -181,31 +190,23 @@ def _candidate_rows(result: MarketResult) -> str:
     return "".join(rows)
 
 
-def _warning_items(result: MarketResult) -> str:
+def _issue_rows(issues: list[Issue], border: str, color: str) -> str:
     items: list[str] = []
-    missing = sorted(result.missing.items())
-    for code_name, reason in missing[:MAX_WARNING_ITEMS]:
-        parts = str(code_name).split(" ", 1)
-        code = escape(parts[0])
-        company = escape(parts[1]) if len(parts) > 1 else ""
+    for issue in issues[:MAX_WARNING_ITEMS]:
+        head = (f'<div style="font-size:13px;font-weight:bold;color:{color};">{escape(issue.symbol)} '
+                f'<span style="font-weight:normal;">{escape(issue.name)}</span></div>' if issue.symbol else "")
         items.append(
             f"""<tr>
-              <td valign="top" style="padding:10px 0;border-top:1px solid #fed7aa;">
-                <div style="font-size:13px;font-weight:bold;color:#7c2d12;">{code}</div>
-                {f'<div style="margin-top:2px;font-size:12px;color:#7c2d12;">{company}</div>' if company else ''}
-                <div style="margin-top:5px;font-size:12px;line-height:18px;color:#9a3412;word-break:break-word;">{escape(str(reason))}</div>
+              <td valign="top" style="padding:10px 0;border-top:1px solid {border};">
+                {head}
+                <div style="margin-top:4px;font-size:12px;line-height:18px;color:{color};word-break:break-word;"><strong>[{escape(issue.level)}] {escape(CATEGORY_TEXT.get(issue.category, issue.category))}</strong> · {escape(issue.message)}</div>
               </td>
             </tr>"""
         )
-    if len(missing) > MAX_WARNING_ITEMS:
+    if len(issues) > MAX_WARNING_ITEMS:
         items.append(
-            '<tr><td style="padding:10px 0;border-top:1px solid #fed7aa;font-size:12px;color:#9a3412;">'
-            f"외 {len(missing) - MAX_WARNING_ITEMS}건 — 전체 목록은 실행 artifact(JSON)와 텍스트 본문 참조</td></tr>"
-        )
-    if result.error:
-        items.append(
-            '<tr><td style="padding:10px 0;border-top:1px solid #fed7aa;font-size:12px;line-height:18px;color:#9a3412;">'
-            + escape(result.error) + "</td></tr>"
+            f'<tr><td style="padding:10px 0;border-top:1px solid {border};font-size:12px;color:{color};">'
+            f"외 {len(issues) - MAX_WARNING_ITEMS}건 — 전체 목록은 실행 artifact(JSON)와 텍스트 본문 참조</td></tr>"
         )
     return "".join(items)
 
@@ -219,7 +220,7 @@ def _market_card(result: MarketResult) -> str:
     metrics = "".join(_summary_cell(label, value, "16%") for label, value in _metrics(result))
     code_label = "Ticker" if result.market == "US" else "Code"
     if result.candidates.empty:
-        if result.status in {FAILED, SKIPPED}:
+        if result.status in {ERROR, SKIPPED}:
             text = "이번 실행에서 제외된 시장입니다." if result.status == SKIPPED else "데이터가 불완전하여 탐지 결과를 확정할 수 없습니다."
             body = f'<div style="padding:18px;text-align:center;font-size:13px;color:#9a3412;background:#fff7ed;">{text}</div>'
         else:
@@ -239,11 +240,16 @@ def _market_card(result: MarketResult) -> str:
           </table>
         </div>"""
     message = _status_message(result)
-    data_warning = (f'<div style="padding:12px;color:#9a3412;background:#fff7ed;font-size:12px;line-height:18px;">'
-                    f'<strong>Missing: {result.missing_count} · Fallback: {result.fallback_count} · 불일치: {result.mismatch_count}</strong>'
-                    f'<br>{escape(message)}</div>' if message else "")
-    notice = (f'<div style="padding:10px 12px;color:#1e3a8a;background:#eff6ff;font-size:12px;">&#8505; {escape(result.notice)}</div>'
-              if result.notice else "")
+    if message and result.status in (WARNING, ERROR):
+        data_warning = (f'<div style="padding:12px;color:#9a3412;background:#fff7ed;font-size:12px;line-height:18px;">'
+                        f'<strong>{escape(message)}</strong></div>')
+    elif message:
+        data_warning = (f'<div style="padding:10px 12px;color:#1e3a8a;background:#eff6ff;font-size:12px;line-height:18px;">'
+                        f'&#8505; {escape(message)}</div>')
+    else:
+        data_warning = ""
+    notice = "".join(f'<div style="padding:6px 12px;color:#475569;background:#f8fafc;font-size:11px;">소스: {escape(note)}</div>'
+                     for note in result.source_notes)
     return f"""
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:0 0 18px;border:1px solid #dbe2ea;border-collapse:separate;border-spacing:0;background:#ffffff;">
         <tr><td style="height:4px;background:{accent};font-size:0;line-height:0;">&nbsp;</td></tr>
@@ -261,26 +267,37 @@ def _market_card(result: MarketResult) -> str:
         <tr><td style="padding:0 18px 16px;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #e5e7eb;border-collapse:collapse;background:#f8fafc;"><tr>{dates}</tr></table>
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #e5e7eb;border-top:0;border-collapse:collapse;background:#f8fafc;"><tr>{metrics}</tr></table>
+          <div style="margin-top:6px;font-size:11px;color:#64748b;">교차검증 완료 {result.cross_checked_count:,} / {result.analyzed_count:,} · 소스 불일치 {result.mismatch_count}</div>
         </td></tr>
         <tr><td>{notice}{data_warning}{body}</td></tr>
       </table>"""
 
 
 def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datetime) -> str:
-    warning_results = [result for result in (us, kr)
-                       if result.status != SKIPPED and (result.missing or result.error or result.has_data_warning)]
-    warning_count = sum(len(result.missing) + bool(result.error) for result in warning_results)
-    warnings = ""
-    if warning_results:
-        warning_rows = "".join(
-            '<tr><td style="padding:8px 0;font-weight:bold;color:#92400e;">'
-            + escape(result.title) + " — " + escape(result.status) + "</td></tr>"
-            + _warning_items(result) for result in warning_results
-        )
+    active = [result for result in (us, kr) if result.status != SKIPPED]
+    # DATA WARNING counts only WARNING/ERROR issues; INFO goes to a separate box.
+    warning_count = sum(len(result.data_warning_issues) for result in active)
+    info_count = sum(len(result.info_issues) for result in active)
+    warnings = infos = ""
+    if warning_count:
+        rows = "".join(
+            '<tr><td style="padding:8px 0;font-weight:bold;color:#92400e;">' + escape(result.title) + " — "
+            + escape(result.status) + "</td></tr>" + _issue_rows(result.data_warning_issues, "#fed7aa", "#9a3412")
+            for result in active if result.data_warning_issues)
         warnings = f"""
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:0 0 18px;border:1px solid #f59e0b;border-collapse:separate;border-spacing:0;background:#fffbeb;">
-        <tr><td style="padding:15px 18px 8px;font-size:15px;font-weight:bold;color:#92400e;">&#9888; DATA WARNING — 데이터 누락·경고 · {warning_count}건</td></tr>
-        <tr><td style="padding:0 18px 8px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">{warning_rows}</table></td></tr>
+        <tr><td style="padding:15px 18px 8px;font-size:15px;font-weight:bold;color:#92400e;">&#9888; DATA WARNING · {warning_count}건</td></tr>
+        <tr><td style="padding:0 18px 8px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">{rows}</table></td></tr>
+      </table>"""
+    if info_count:
+        rows = "".join(
+            '<tr><td style="padding:8px 0;font-weight:bold;color:#1e3a8a;">' + escape(result.title) + "</td></tr>"
+            + _issue_rows(result.info_issues, "#bfdbfe", "#1e40af")
+            for result in active if result.info_issues)
+        infos = f"""
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:0 0 18px;border:1px solid #93c5fd;border-collapse:separate;border-spacing:0;background:#eff6ff;">
+        <tr><td style="padding:15px 18px 8px;font-size:14px;font-weight:bold;color:#1e3a8a;">&#8505; 참고 (정상 처리) · {info_count}건</td></tr>
+        <tr><td style="padding:0 18px 8px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">{rows}</table></td></tr>
       </table>"""
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -317,12 +334,13 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
         <td class="header-meta-right" align="right" valign="bottom" style="padding-top:12px;font-size:11px;color:#94a3b8;">자동 발송 리포트</td>
       </tr></table>
     </td></tr>
-    <tr><td style="padding:20px 0 0;">{warnings}{_market_card(us)}{_market_card(kr)}</td></tr>
+    <tr><td style="padding:20px 0 0;">{warnings}{infos}{_market_card(us)}{_market_card(kr)}</td></tr>
     <tr><td style="padding:18px 20px;background:#ffffff;border:1px solid #e2e8f0;font-size:11px;line-height:19px;color:#64748b;">
       <strong style="color:#334155;">참고사항</strong><br>
       &#8226; 시장별 표시된 분석일/이전 거래일(각 거래소 실제 거래일)을 기준으로 생성됩니다.<br>
       &#8226; 등락률은 직전 거래일 정규장 종가 대비 분석일 정규장 종가 기준입니다(시간외·프리/애프터마켓 제외).<br>
-      &#8226; Valid Prices는 양일 종가가 모두 검증된 종목 수이며, Coverage = Valid Prices / Listing 입니다.
+      &#8226; Valid Prices는 양일 정규장 종가를 확보한 종목 수이며, Coverage = Valid Prices / Listing 입니다.<br>
+      &#8226; 상태: NORMAL 정상 · INFO 참고사항만 있음(정상 처리) · WARNING 검증 부족 · ERROR 핵심 데이터 확보 실패
     </td></tr>
     <tr><td align="center" style="padding:18px 0 8px;font-size:10px;letter-spacing:.4px;color:#94a3b8;">Automated Market Drop Monitor</td></tr>
   </table>
@@ -330,11 +348,12 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
 
 
 def build_combined_subject(us: MarketResult, kr: MarketResult, test_prefix: str = "") -> str:
+    """[DATA WARNING] only for WARNING/ERROR; INFO never tags the subject."""
     active = [result for result in (us, kr) if result.status != SKIPPED]
     tags = ""
-    failed = [result.market for result in active if result.status == FAILED]
-    if failed:
-        tags += f"[FAILED {'/'.join(failed)}]"
+    errors = [result.market for result in active if result.status == ERROR]
+    if errors:
+        tags += f"[ERROR {'/'.join(errors)}]"
     if any(result.status == WARNING for result in active):
         tags += "[DATA WARNING]"
 
@@ -344,15 +363,15 @@ def build_combined_subject(us: MarketResult, kr: MarketResult, test_prefix: str 
 
     subject = f"{test_prefix.strip()}[급락 모니터]{tags} S&P500 {count_text(us)} · KOSPI {count_text(kr)}"
     if tags:
-        def missing_text(result: MarketResult) -> str:
+        def summary(result: MarketResult) -> str:
             if result.status == SKIPPED:
                 return "-"
             if result.total_count == 0:
                 return "확인불가"
-            fallback = f"(대체 {result.fallback_count})" if result.fallback_count else ""
-            return f"{result.missing_count}건{fallback}"
+            extra = f"(경고 {len(result.data_warning_issues)})" if result.data_warning_issues and not result.missing_count else ""
+            return f"{result.missing_count}건{extra}"
 
-        subject += f" | 데이터 누락 US {missing_text(us)} / KR {missing_text(kr)}"
+        subject += f" | 데이터 누락 US {summary(us)} / KR {summary(kr)}"
     return subject
 
 

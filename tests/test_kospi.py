@@ -1,17 +1,19 @@
-"""KOSPI: fail-soft listing, KRX regular-close pairs, validation and fallback."""
-from datetime import date, datetime, timezone
+"""KOSPI: fail-soft listing, calendar, KRX regular-close consensus and special trading."""
+from dataclasses import replace
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
 
 import kospi
-from config import Settings
-from kospi import (KospiSessionContext, KrPair, ListingError, NaverDay, _parse_yahoo_kr, download_kospi_market_data,
-                   get_kospi_session_context, load_kospi_constituents, reconcile_kr)
+from helpers import FAST, obs
+from kospi import KospiSessionContext, ListingError, download_kospi_market_data, get_kospi_session_context, load_kospi_constituents
 from market_calendar import KST
+from providers.base import INTEGRATED
+from providers.naver import NaverDay
+from special_trading import MarketState
 
 PREV, DAY = date(2026, 9, 28), date(2026, 9, 29)
-FAST = Settings(download_retries=1, retry_backoff_seconds=0, missing_retry_pause_seconds=0, availability_wait_seconds=0, max_workers=4)
 
 
 def item(code, kind="stock", name=None, market="KOSPI"):
@@ -95,88 +97,137 @@ def test_duplicate_listing_rows_are_deduplicated(monkeypatch):
     assert frame["code"].is_unique and len(frame) == 944
 
 
-def yahoo_kr(code="005930", days=(PREV, DAY), closes=(270000.0, 272500.0)):
-    return {"chart": {"result": [{
-        "meta": {"symbol": f"{code}.KS", "exchangeTimezoneName": "Asia/Seoul", "dataGranularity": "1d"},
-        "timestamp": [int(datetime(d.year, d.month, d.day, 0, 0, tzinfo=timezone.utc).timestamp()) for d in days],
-        "indicators": {"quote": [{"close": list(closes), "volume": [1] * len(days)}]}}]}}
+def state(**kw):
+    defaults = dict(source="Daum", as_of=DAY, nxt_tradable=True)
+    defaults.update(kw)
+    return MarketState(**defaults)
 
 
-def test_yahoo_kr_parser_keys_by_kst_session_date():
-    values = _parse_yahoo_kr(yahoo_kr(closes=(269999.99, 272500.01)), "005930")
-    assert values[PREV][0] == 270000 and values[DAY][0] == 272500
-    with pytest.raises(ValueError, match="symbol"):
-        _parse_yahoo_kr(yahoo_kr("000660"), "005930")
+def fake_kr(monkeypatch, rows: dict):
+    """rows: code -> dict(yahoo=(prev, close), daum=(prev, close), naver=(base, integrated, volume),
+    days=(base, integrated), state=MarketState)."""
+
+    def yahoo(code, previous, current, settings=None):
+        prev, close = rows[code].get("yahoo", ("down", "down"))
+        return obs(code, "Yahoo", prev, close, prev_date=previous, day=current)
+
+    def quote(code, previous, current, next_session, settings=None):
+        prev, close = rows[code].get("daum", ("down", "down"))
+        return obs(code, "Daum", prev, close, prev_date=previous, day=current), rows[code].get("state")
+
+    def daily(code, previous, current, settings=None, page_size=10, next_session=None):
+        if "naver" not in rows[code]:
+            return obs(code, "Naver", "down", "down", prev_date=previous, day=current), None, None
+        base, integrated, volume = rows[code]["naver"]
+        observation = obs(code, "Naver", base, integrated, prev_date=previous, day=current, close_type=INTEGRATED)
+        observation.close = replace(observation.close, corroborative=True)
+        return observation, NaverDay(integrated, base, volume, None), None
+
+    def days(code, previous, current, settings=None):
+        base, integrated = rows[code].get("days", ("down", "down"))
+        observation = obs(code, "Daum days", base, integrated, prev_date=previous, day=current, close_type=INTEGRATED)
+        observation.close = replace(observation.close, corroborative=True)
+        return observation
+
+    monkeypatch.setattr(kospi.yahoo, "fetch_kr", yahoo)
+    monkeypatch.setattr(kospi.daum, "fetch_quote", quote)
+    monkeypatch.setattr(kospi.naver, "fetch_daily", daily)
+    monkeypatch.setattr(kospi.daum, "fetch_days", days)
 
 
-def naver(close, base, volume=100, ratio=None, day=DAY):
-    return {day: NaverDay(close, base, volume, ratio)}
+def run_kr(monkeypatch, rows, threshold=None):
+    fake_kr(monkeypatch, rows)
+    universe = pd.DataFrame({"code": list(rows), "company_name": [f"종목{c}" for c in rows]})
+    return download_kospi_market_data(universe, KospiSessionContext(DAY, PREV), FAST, threshold_pct=threshold)
+
+
+def normal(prev, close, integrated=None):
+    return dict(yahoo=(prev, close), daum=(prev, close), naver=(prev, integrated or close + 100, 1000), state=state())
+
+
+def test_krx_close_used_not_nxt_integrated_price(monkeypatch):
+    # SK이노베이션 2026-09-29: KRX 158,200 -> 145,900; Naver integrated 147,200.
+    result = run_kr(monkeypatch, {"096770": normal(158200, 145900, integrated=147200)})
+    row = result.prices.iloc[0]
+    assert (row.previous_close, row.close) == (158200, 145900) and row.validation_status == "CROSS_VALIDATED"
+    assert row.change_pct == pytest.approx(-7.774968, abs=1e-6) and row.detected
 
 
 @pytest.mark.parametrize("close,detected", [(93.01, False), (93.0, True), (92.99, True)])
-def test_kr_threshold_boundaries_use_raw_change(close, detected):
-    """TEST 5-7: -6.99% not detected, -7.00% and -7.01% detected."""
-    row, _ = reconcile_kr("005930", KrPair(100.0, close), naver(close, 100.0), None, PREV, DAY, -7.0)
-    from detector import is_drop
-    assert is_drop(row["change_pct"], -7.0) is detected
+def test_kr_threshold_boundaries_use_raw_change(monkeypatch, close, detected):
+    result = run_kr(monkeypatch, {"000001": normal(100, close)})
+    assert bool(result.prices.iloc[0].detected) is detected
 
 
-def test_krx_close_is_used_not_nxt_integrated_price():
-    # SK이노베이션 2026-09-29: KRX 158,200 -> 145,900; Naver integrated 147,200.
-    row, _ = reconcile_kr("096770", KrPair(158200.0, 145900.0), naver(147200.0, 158200.0), None, PREV, DAY, -7.0)
-    assert (row["previous_close"], row["close"]) == (158200.0, 145900.0)
-    assert row["change_pct"] == pytest.approx(-7.774968, abs=1e-6)
-    assert row["validation"] == "Naver KRX 기준가 일치" and not row["mismatch"]
+def test_non_nxt_stock_integrated_close_counts_as_regular(monkeypatch):
+    rows = {"002785": dict(yahoo=(10110, "stale"), daum=("down", "down"), naver=(10110, 8700, 500),
+                           days=(10110, 8700), state=state(nxt_tradable=False))}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.close == 8700 and row.validation_status == "FALLBACK_VALIDATED"
+    assert "비NXT" in row.source
 
 
-def test_previous_close_mismatch_is_flagged_and_recall_preserved():
-    row, _ = reconcile_kr("000001", KrPair(100.0, 93.5), naver(93.5, 101.0), None, PREV, DAY, -7.0)
-    assert row["mismatch"] and row["change_pct"] <= -7.0 and "Naver KRX 기준가" in row["source"]
+def test_nxt_stock_integrated_close_is_never_a_regular_close(monkeypatch):
+    rows = {"096770": dict(yahoo=(158200, "stale"), daum=("down", "down"), naver=(158200, 147200, 1000),
+                           days=(158200, 147200), state=state(nxt_tradable=True))}
+    result = run_kr(monkeypatch, rows)
+    assert result.prices.empty and "096770" in result.missing
 
 
-def test_garbage_yahoo_previous_close_replaced_by_krx_base():
-    row, _ = reconcile_kr("000300", KrPair(21086206.0, 4200.0), naver(4200.0, 4200.0), None, PREV, DAY, -7.0)
-    assert row["change_pct"] == 0.0
+def test_integrated_close_equal_to_regular_close_corroborates(monkeypatch):
+    # Daum does not cover the security; Naver's integrated last trade equals Yahoo's KRX close.
+    rows = {"094800": dict(yahoo=(8000, 7880), naver=(8000, 7880, 34879), state=None)}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.validation_status == "CROSS_VALIDATED" and row.severity == "NORMAL"
 
 
-def test_halted_stock_is_valid_with_zero_change():
-    row, reason = reconcile_kr("001470", KrPair(error="Yahoo 누락"), naver(5820.0, 5820.0, volume=0), None, PREV, DAY, -7.0)
-    assert reason is None and row["change_pct"] == 0.0 and not row["fallback"]
+def test_integrated_close_different_from_regular_close_is_not_a_mismatch(monkeypatch):
+    rows = {"096770": dict(yahoo=(158200, 145900), naver=(158200, 147200, 1000), state=None)}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert not row.mismatch and row.close == 145900 and row.validation_status == "PRIMARY_ONLY"
 
 
-def test_liquidation_trading_beyond_price_limit_is_kept_and_flagged():
-    # 부산주공 2026-09-29: KRX base 486 -> 37 (정리매매, no ±30% limit).
-    row, _ = reconcile_kr("005030", KrPair(error="Yahoo 전일 누락"), naver(37.0, 486.0, volume=28872090), None, PREV, DAY, -7.0)
-    assert row["fallback"] and row["limit_exceeded"] and row["change_pct"] == pytest.approx(-92.386831, abs=1e-5)
+def test_halted_stock_with_corrupt_yahoo_bar(monkeypatch):
+    rows = {"000300": dict(yahoo=(21086206, 4200), daum=(None, 4200), naver=(4200, 4200, 0),
+                           state=state(trading_suspended=True, upper_limit=0.0, lower_limit=0.0))}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.change_pct == 0 and not row.detected and row.severity != "WARNING"
 
 
-@pytest.mark.parametrize("pair", [KrPair(error="current NaN"), KrPair(error="previous NaN")])
-def test_nan_prices_without_backup_are_missing(pair):
-    """TEST 13/14."""
-    row, reason = reconcile_kr("000002", pair, None, "Naver down", PREV, DAY, -7.0)
-    assert row is None and "Naver down" in reason
+def test_no_trade_day_close_confirmed_by_base_price_rule(monkeypatch):
+    # No trades (Naver volume 0, close == base); Yahoo has no bar for the day and
+    # Daum does not cover the security. Yahoo's previous close equals the base.
+    rows = {"0120X0": dict(yahoo=(10085, "stale"), naver=(10085, 10085, 0), state=None)}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.change_pct == 0 and row.validation_status == "FALLBACK_VALIDATED" and row.severity == "NORMAL"
+    assert not row.fallback and "무거래" in row.validation
 
 
-def fake_markets(monkeypatch, yahoo: dict, naver_days: dict):
-    monkeypatch.setattr(kospi, "fetch_yahoo_kr_pair", lambda c, p, d, s: yahoo.get(c, KrPair(error=f"Yahoo 누락 {c}")))
+def test_special_trading_beyond_limit_is_detected_as_info(monkeypatch):
+    rows = {"999990": dict(yahoo=("stale", 37), daum=(None, 37), naver=(486, 37, 28872090), days=(486, 37),
+                           state=state(pre_delisting_trading=True, upper_limit=0.0, lower_limit=0.0,
+                                       nxt_tradable=False))}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.detected and row.special_label == "SPECIAL_TRADING_VALIDATED" and row.severity == "INFO"
 
-    def fetch(code, settings, page_size):
-        if code not in naver_days:
-            raise RuntimeError("HTTP 404")
-        return naver_days[code]
 
-    monkeypatch.setattr(kospi, "fetch_naver_days", fetch)
+def test_unexplained_move_beyond_limit_is_warning_but_still_detected(monkeypatch):
+    rows = {"999991": dict(normal(1000, 500), state=state())}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.detected and row.special_label == "SPECIAL_TRADING_UNCONFIRMED" and row.severity == "WARNING"
+
+
+def test_previous_close_disagreement_near_threshold_is_warning(monkeypatch):
+    rows = {"000001": dict(yahoo=(100, 93.5), daum=(None, 93.5), naver=(101, 94, 10), state=state())}
+    row = run_kr(monkeypatch, rows).prices.iloc[0]
+    assert row.validation_status == "CROSS_SOURCE_MISMATCH" and row.detected and row.severity == "WARNING"
 
 
 def test_one_missing_stock_does_not_fail_market(monkeypatch):
-    """TEST 11/16: provider gap on one symbol -> missing 1, the rest analyzed."""
-    codes = [f"{i:06d}" for i in range(50)]
-    universe = pd.DataFrame({"code": codes, "company_name": codes})
-    yahoo = {c: KrPair(1000.0, 1000.0) for c in codes[1:]}
-    yahoo["000010"] = KrPair(1000.0, 930.0)
-    days = {c: naver(1000.0, 1000.0) for c in codes[1:]}
-    fake_markets(monkeypatch, yahoo, days)
-    result = download_kospi_market_data(universe, KospiSessionContext(DAY, PREV), FAST)
+    rows = {f"{i:06d}": normal(1000, 1000) for i in range(1, 50)}
+    rows["000010"] = normal(1000, 930)
+    rows["000000"] = {}
+    result = run_kr(monkeypatch, rows)
     assert len(result.prices) == 49 and list(result.missing) == ["000000"]
     assert list(result.prices.loc[result.prices.detected, "code"]) == ["000010"]
 

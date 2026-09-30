@@ -1,0 +1,57 @@
+{
+ "data": {
+  "symbol": "FICO",
+  "totalRecords": 5,
+  "tradesTable": {
+   "asOf": null,
+   "headers": {
+    "date": "Date",
+    "close": "Close/Last",
+    "volume": "Volume",
+    "open": "Open",
+    "high": "High",
+    "low": "Low"
+   },
+   "rows": [
+    {
+     "date": "09/28/2026",
+     "close": "$840.89",
+     "volume": "394,267",
+     "open": "$852.86",
+     "high": "$853.545",
+     "low": "$832.00"
+    },
+    {
+     "date": "09/25/2026",
+     "close": "$863.09",
+     "volume": "387,457",
+     "open": "$857.00",
+     "high": "$870.00",
+     "low": "$848.639"
+    },
+    {
+     "date": "09/24/2026",
+     "close": "$856.48",
+     "volume": "502,492",
+     "open": "$888.12",
+     "high": "$892.846",
+     "low": "$855.00"
+    },
+    {
+     "date": "09/23/2026",
+     "close": "$879.62",
+     "volume": "501,918",
+     "open": "$910.00",
+     "high": "$916.05",
+     "low": "$875.45"
+    }
+   ]
+  }
+ },
+ "message": null,
+ "status": {
+  "rCode": 200,
+  "bCodeMessage": null,
+  "developerMessage": null
+ }
+}

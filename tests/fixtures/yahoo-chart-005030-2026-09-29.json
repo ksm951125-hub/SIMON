@@ -1,0 +1,95 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "KRW",
+     "symbol": "005030.KS",
+     "exchangeName": "KSC",
+     "fullExchangeName": "KSE",
+     "instrumentType": "EQUITY",
+     "firstTradeDate": 1784246400,
+     "regularMarketTime": 1790749813,
+     "hasPrePostMarketData": false,
+     "gmtoffset": 32400,
+     "timezone": "KST",
+     "exchangeTimezoneName": "Asia/Seoul",
+     "regularMarketPrice": 44.0,
+     "regularMarketChangePercent": 18.919,
+     "fulldayPrice": 44.0,
+     "fulldayChange": 7.0,
+     "fulldayChangePercent": 18.919,
+     "fiftyTwoWeekHigh": 62.0,
+     "fiftyTwoWeekLow": 44.0,
+     "regularMarketDayHigh": 62.0,
+     "regularMarketDayLow": 44.0,
+     "regularMarketVolume": 28625712,
+     "chartPreviousClose": 37.0,
+     "priceHint": 2,
+     "currentTradingPeriod": {
+      "pre": {
+       "timezone": "KST",
+       "end": 1790726400,
+       "start": 1790721000,
+       "gmtoffset": 32400
+      },
+      "regular": {
+       "timezone": "KST",
+       "end": 1790748000,
+       "start": 1790726400,
+       "gmtoffset": 32400
+      },
+      "post": {
+       "timezone": "KST",
+       "end": 1790758800,
+       "start": 1790748000,
+       "gmtoffset": 32400
+      }
+     },
+     "dataGranularity": "1d",
+     "range": "",
+     "validRanges": [
+      "1d",
+      "5d",
+      "1mo",
+      "3mo",
+      "ytd",
+      "max"
+     ]
+    },
+    "timestamp": [
+     1790749813
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "volume": [
+        28625712
+       ],
+       "high": [
+        62.0
+       ],
+       "low": [
+        44.0
+       ],
+       "close": [
+        44.0
+       ],
+       "open": [
+        46.0
+       ]
+      }
+     ],
+     "adjclose": [
+      {
+       "adjclose": [
+        44.0
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}
