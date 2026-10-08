@@ -59,6 +59,10 @@ class PriceObservation:
     volume: float | None = None
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     note: str | None = None
+    # Listing evidence: last date this source has a price for the symbol, and
+    # whether the source says the symbol does not exist (renamed/delisted).
+    latest_date: date | None = None
+    symbol_unknown: bool = False
 
     @property
     def has_any(self) -> bool:
@@ -81,10 +85,11 @@ def positive(value) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
-def failed(symbol: str, source: str, detail: str, status: str = UNAVAILABLE) -> PriceObservation:
+def failed(symbol: str, source: str, detail: str, status: str = UNAVAILABLE, *,
+           symbol_unknown: bool = False) -> PriceObservation:
     return PriceObservation(symbol, source,
                             close=FieldValue(status=status, detail=detail),
-                            previous_close=FieldValue(status=status, detail=detail))
+                            previous_close=FieldValue(status=status, detail=detail), symbol_unknown=symbol_unknown)
 
 
 def from_series(symbol: str, source: str, series: dict[date, float | None], previous_date: date, session_date: date,
@@ -102,5 +107,6 @@ def from_series(symbol: str, source: str, series: dict[date, float | None], prev
         return FieldValue(date=day, status=STALE_SOURCE,
                           detail=f"{day} 없음, 최신 {latest}" if latest else "데이터 없음", session_type=session_type)
 
+    priced = [day for day, value in series.items() if positive(value) is not None]
     return PriceObservation(symbol, source, close=pick(session_date), previous_close=pick(previous_date),
-                            adjustment=adjustment)
+                            adjustment=adjustment, latest_date=max(priced) if priced else None)

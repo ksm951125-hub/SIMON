@@ -22,12 +22,19 @@ def symbol_for(ticker: str) -> str:
     return ticker.strip().upper().replace("-", ".")
 
 
+class SymbolUnknown(ValueError):
+    """Nasdaq reports that the symbol does not exist (renamed or delisted)."""
+
+
 def parse(payload: dict) -> dict[date, float | None]:
     table = ((payload or {}).get("data") or {}).get("tradesTable") or {}
     rows = table.get("rows") or []
     if not rows:
         status = (payload or {}).get("status") or {}
-        raise ValueError(f"Nasdaq 데이터 없음 ({status.get('bCodeMessage') or status.get('rCode')})")
+        messages = status.get("bCodeMessage") or []
+        if any(isinstance(item, dict) and item.get("code") == 1001 for item in messages):
+            raise SymbolUnknown("Nasdaq 심볼 없음(Symbol not exists): 티커 변경·상장폐지 가능")
+        raise ValueError(f"Nasdaq 데이터 없음 ({messages or status.get('rCode')})")
     series: dict[date, float | None] = {}
     for row in rows:
         day = datetime.strptime(row["date"], "%m/%d/%Y").date()
@@ -44,6 +51,8 @@ def fetch(ticker: str, previous_date: date, session_date: date, settings: Settin
         response = get_with_retry(URL.format(symbol=symbol_for(ticker)), params=params, headers=HEADERS,
                                   settings=settings, attempts=2)
         series = parse(response.json())
+    except SymbolUnknown as exc:
+        return failed(ticker, SOURCE, str(exc), symbol_unknown=True)
     except Exception as exc:
         return failed(ticker, SOURCE, f"Nasdaq 조회 실패: {exc}")
     return from_series(ticker, SOURCE, series, previous_date, session_date, adjustment="split")

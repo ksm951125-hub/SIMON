@@ -1,0 +1,65 @@
+{
+ "data": {
+  "symbol": "SKYD",
+  "totalRecords": 5,
+  "tradesTable": {
+   "asOf": null,
+   "headers": {
+    "date": "Date",
+    "close": "Close/Last",
+    "volume": "Volume",
+    "open": "Open",
+    "high": "High",
+    "low": "Low"
+   },
+   "rows": [
+    {
+     "date": "10/07/2026",
+     "close": "$8.89",
+     "volume": "43,300,230",
+     "open": "$9.37",
+     "high": "$9.4952",
+     "low": "$8.65"
+    },
+    {
+     "date": "10/06/2026",
+     "close": "$9.53",
+     "volume": "25,342,840",
+     "open": "$9.84",
+     "high": "$9.84",
+     "low": "$9.125"
+    },
+    {
+     "date": "10/05/2026",
+     "close": "$9.775",
+     "volume": "31,682,590",
+     "open": "$9.26",
+     "high": "$9.87",
+     "low": "$9.16"
+    },
+    {
+     "date": "10/02/2026",
+     "close": "$9.50",
+     "volume": "37,388,660",
+     "open": "$9.35",
+     "high": "$9.67",
+     "low": "$8.97"
+    },
+    {
+     "date": "10/01/2026",
+     "close": "$9.34",
+     "volume": "44,268,020",
+     "open": "$10.11",
+     "high": "$10.26",
+     "low": "$9.325"
+    }
+   ]
+  }
+ },
+ "message": null,
+ "status": {
+  "rCode": 200,
+  "bCodeMessage": null,
+  "developerMessage": null
+ }
+}

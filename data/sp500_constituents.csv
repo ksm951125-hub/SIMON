@@ -120,7 +120,6 @@ CSGP,CoStar Group,Real Estate
 CSX,CSX Corporation,Industrials
 CTAS,Cintas,Industrials
 CTSH,Cognizant,Information Technology
-CTVA,Corteva,Materials
 CVNA,Carvana,Consumer Discretionary
 CVS,CVS Health,Health Care
 CVX,Chevron Corporation,Energy
@@ -378,7 +377,6 @@ PPG,PPG Industries,Materials
 PPL,PPL Corporation,Utilities
 PRU,Prudential Financial,Financials
 PSA,Public Storage,Real Estate
-PSKY,Paramount Skydance Corporation,Communication Services
 PSX,Phillips 66,Energy
 PTC,PTC Inc.,Information Technology
 PWR,Quanta Services,Industrials
@@ -405,6 +403,7 @@ SBUX,Starbucks,Consumer Discretionary
 SCHW,Charles Schwab Corporation,Financials
 SHW,Sherwin-Williams,Materials
 SJM,J.M. Smucker Company (The),Consumer Staples
+SKYD,Paramount Skydance Corporation,Communication Services
 SLB,Schlumberger,Energy
 SMCI,Supermicro,Information Technology
 SNA,Snap-on,Industrials
@@ -449,6 +448,7 @@ TSLA,"Tesla, Inc.",Consumer Discretionary
 TSN,Tyson Foods,Consumer Staples
 TT,Trane Technologies,Industrials
 TTWO,Take-Two Interactive,Communication Services
+TWLO,Twilio,Information Technology
 TXN,Texas Instruments,Information Technology
 TXT,Textron,Industrials
 TYL,Tyler Technologies,Information Technology
@@ -476,10 +476,10 @@ VRTX,Vertex Pharmaceuticals,Health Care
 VST,Vistra Corp .,Utilities
 VTR,Ventas,Real Estate
 VTRS,Viatris,Health Care
+VYLR,Vylor,Consumer Staples
 VZ,Verizon,Communication Services
 WAB,Wabtec,Industrials
 WAT,Waters Corporation,Health Care
-WBD,Warner Bros. Discovery,Communication Services
 WDAY,"Workday, Inc.",Information Technology
 WDC,Western Digital,Information Technology
 WEC,WEC Energy Group,Utilities

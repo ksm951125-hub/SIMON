@@ -1,0 +1,131 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "SKYD",
+     "exchangeName": "NYQ",
+     "fullExchangeName": "NYSE",
+     "instrumentType": "EQUITY",
+     "firstTradeDate": 1133793000,
+     "regularMarketTime": 1791403203,
+     "hasPrePostMarketData": true,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 8.89,
+     "regularMarketChangePercent": -6.716,
+     "fulldayPrice": 9.04,
+     "fulldayChange": 0.16,
+     "fulldayChangePercent": 1.802,
+     "fiftyTwoWeekHigh": 18.65,
+     "fiftyTwoWeekLow": 7.62,
+     "regularMarketDayHigh": 9.495,
+     "regularMarketDayLow": 8.65,
+     "regularMarketVolume": 43231834,
+     "longName": "Skydance Corporation",
+     "shortName": "Paramount Skydance Corporation",
+     "chartPreviousClose": 10.28,
+     "priceHint": 2,
+     "currentTradingPeriod": {
+      "pre": {
+       "timezone": "EDT",
+       "start": 1791446400,
+       "end": 1791466200,
+       "gmtoffset": -14400
+      },
+      "regular": {
+       "timezone": "EDT",
+       "start": 1791466200,
+       "end": 1791489600,
+       "gmtoffset": -14400
+      },
+      "post": {
+       "timezone": "EDT",
+       "start": 1791489600,
+       "end": 1791504000,
+       "gmtoffset": -14400
+      }
+     },
+     "dataGranularity": "1d",
+     "range": "",
+     "validRanges": [
+      "1d",
+      "5d",
+      "1mo",
+      "3mo",
+      "6mo",
+      "1y",
+      "2y",
+      "5y",
+      "10y",
+      "ytd",
+      "max"
+     ]
+    },
+    "timestamp": [
+     1790688600,
+     1790775000,
+     1790861400,
+     1790947800,
+     1791207000,
+     1791293400,
+     1791379800
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "low": [
+        9.890000343322754,
+        10.0600004196167,
+        9.329999923706055,
+        8.970000267028809,
+        9.15999984741211,
+        9.130000114440918,
+        8.649999618530273
+       ],
+       "open": [
+        10.199999809265137,
+        10.119999885559082,
+        10.109999656677246,
+        9.350000381469727,
+        9.260000228881836,
+        9.84000015258789,
+        9.369999885559082
+       ],
+       "high": [
+        10.3100004196167,
+        10.420000076293945,
+        10.260000228881836,
+        9.670000076293945,
+        9.869999885559082,
+        9.84000015258789,
+        9.5
+       ],
+       "close": [
+        9.989999771118164,
+        10.329999923706055,
+        9.34000015258789,
+        9.5,
+        9.779999732971191,
+        9.529999732971191,
+        8.890000343322754
+       ],
+       "volume": [
+        19006400,
+        31994500,
+        44268000,
+        37388700,
+        31682600,
+        25342800,
+        43250900
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

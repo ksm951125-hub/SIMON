@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 
 import pandas as pd
@@ -28,7 +28,7 @@ import pandas as pd
 from config import SETTINGS, Settings
 from net import retry_until_available
 from providers import cnbc, nasdaq, yahoo
-from providers.base import PriceObservation, failed
+from providers.base import NOT_PROVIDED, FieldValue, PriceObservation, failed
 from validation import assess
 
 LOGGER = logging.getLogger(__name__)
@@ -38,6 +38,8 @@ PRICE_TOLERANCE = 0.011
 # source is skipped for the rest of the run.
 NASDAQ_CIRCUIT_BREAKER = 25
 NASDAQ_WORKERS = 3
+# More "trading ended" symbols than this in one run is treated as a data problem.
+MAX_ENDED_SYMBOLS = 5
 
 
 @dataclass
@@ -49,6 +51,49 @@ class UsCollection:
     cross_checked_count: int = 0
     source_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     notices: list[str] = field(default_factory=list)
+    # Listing changes detected from the data itself (constituent lists lag):
+    excluded: dict[str, str] = field(default_factory=dict)     # no trade on either session -> not analyzed
+    renamed: dict[str, str] = field(default_factory=dict)      # old ticker -> successor ticker
+    transitions: dict[str, str] = field(default_factory=dict)  # missing because the symbol vanished
+
+
+def listing_gap(observations: list[PriceObservation], previous_date: date, session_date: date) -> str | None:
+    """Classify a symbol for which no source has a usable analysis-day close.
+
+    "ENDED":      every source's last trade is before the previous session
+                  (merger completed, delisted or halted): no regular close on
+                  either day, so no drop can have happened.
+    "TRANSITION": no analysis-day trade anywhere and at least one source no
+                  longer knows the symbol (ticker change in progress, delisting).
+    None:         ordinary data gap.
+    """
+    if any(o.close.usable for o in observations):
+        return None
+    latest = max((o.latest_date for o in observations if o.latest_date), default=None)
+    unknown = any(o.symbol_unknown for o in observations)
+    if latest is not None and latest < previous_date and not any(o.previous_close.usable for o in observations):
+        return "ENDED"
+    if unknown and (latest is None or latest < session_date):
+        return "TRANSITION"
+    return None
+
+
+def _resolve_successor(ticker: str, company_name: str, old_primary: PriceObservation, exclude: set[str],
+                       previous_date: date, session_date: date, settings: Settings, assess_symbol):
+    """Analyze the successor symbol of a renamed constituent, or return None."""
+    for candidate in yahoo.find_successor_symbols(ticker, company_name, exclude, settings):
+        observations = [yahoo.fetch_us(candidate, previous_date, session_date, settings),
+                        nasdaq.fetch(candidate, previous_date, session_date, settings),
+                        cnbc.fetch_batch([candidate], session_date, settings, previous_date)[candidate]]
+        if old_primary.previous_close.usable:
+            # The old symbol's last close is the same security's previous close.
+            observations.append(replace(old_primary, source=f"Yahoo(이전 티커 {ticker})",
+                                        close=FieldValue(status=NOT_PROVIDED)))
+        assessment = assess_symbol(candidate, observations)
+        if assessment.valid:
+            return candidate, assessment
+        LOGGER.warning("[US] %s 후보 %s: 양일 종가 확보 실패 (%s)", ticker, candidate, assessment.reason)
+    return None
 
 
 def _stats(observations: dict[str, PriceObservation]) -> dict[str, int]:
@@ -134,22 +179,64 @@ def download_market_data(
                     time.monotonic() - stage, len(nasdaq_targets), counters["ok"], counters["fail"], _stats(secondary))
 
     records, missing = [], {}
+    excluded: dict[str, str] = {}
+    renamed: dict[str, str] = {}
+    transitions: dict[str, str] = {}
     names = constituents.set_index("yahoo_ticker")
+    current_symbols = set(constituents["ticker"].str.upper()) | set(tickers)
+
+    def assess_symbol(symbol: str, observations: list[PriceObservation]):
+        return assess(symbol, observations, primary=yahoo.SOURCE, tolerance=PRICE_TOLERANCE,
+                      threshold_pct=threshold_pct, validation_band_pct=settings.us_validation_band_pct)
+
     for ticker in tickers:
         observations = [primary[ticker]] + [source[ticker] for source in (secondary, tertiary) if ticker in source]
-        assessment = assess(ticker, observations, primary=yahoo.SOURCE, tolerance=PRICE_TOLERANCE,
-                            threshold_pct=threshold_pct, validation_band_pct=settings.us_validation_band_pct)
+        assessment = assess_symbol(ticker, observations)
+        listing_note = ""
         if not assessment.valid:
-            missing[ticker] = assessment.reason
-            continue
+            gap = listing_gap(observations, previous_session_date, session_date) if cross_check else None
+            latest = max((o.latest_date for o in observations if o.latest_date), default=None)
+            successor = None
+            if gap and any(o.symbol_unknown for o in observations):
+                successor = _resolve_successor(ticker, names.loc[ticker]["company_name"], primary[ticker],
+                                               current_symbols, previous_session_date, session_date, settings,
+                                               assess_symbol)
+            if successor is not None:
+                new_ticker, assessment = successor
+                renamed[ticker] = new_ticker
+                listing_note = f"티커 변경 추정: {ticker} → {new_ticker} (회사명 일치, 구성종목 목록 갱신 전)"
+                LOGGER.warning("[US] 티커 변경 추정 %s → %s", ticker, new_ticker)
+            elif gap == "ENDED":
+                excluded[ticker] = (f"최종 거래일 {latest}: {previous_session_date}·{session_date} 거래 없음 "
+                                    "(인수·상장폐지·거래정지 추정) → 분석 대상 제외")
+                continue
+            else:
+                missing[ticker] = assessment.reason
+                if gap == "TRANSITION":
+                    transitions[ticker] = (f"분석일 거래 기록 없음(최종 거래일 {latest}), 거래소 심볼 미인식 — "
+                                           "티커 변경·상장폐지 추정, 새 티커를 찾지 못함: 확인 필요")
+                continue
         info = names.loc[ticker]
         row = asdict(assessment)
         row["note"] = "; ".join(row.pop("notes"))
         row["outliers"] = "; ".join(row["outliers"])
         row["stale_sources"] = ",".join(row["stale_sources"])
-        records.append({"ticker": info["ticker"], "yahoo_ticker": ticker, "company_name": info["company_name"],
-                        "sector": info.get("sector", ""), "session_date": session_date,
-                        "previous_session_date": previous_session_date, **row})
+        if listing_note:
+            row["note"] = "; ".join(filter(None, [listing_note, row["note"]]))
+            if row["severity"] == "NORMAL":
+                row["severity"] = "INFO"
+        display = renamed.get(ticker)
+        records.append({"ticker": display or info["ticker"], "yahoo_ticker": display or ticker,
+                        "company_name": info["company_name"], "sector": info.get("sector", ""),
+                        "session_date": session_date, "previous_session_date": previous_session_date,
+                        "listing_note": listing_note, "previous_ticker": ticker if display else "", **row})
+    # Real delistings/mergers are rare. Many "ended" symbols at once means a data
+    # problem, so they stay missing (WARNING) instead of leaving the universe.
+    if len(excluded) > max(MAX_ENDED_SYMBOLS, len(tickers) * 0.01):
+        LOGGER.warning("[US] 거래 종료 판정 %d종목 과다 → 제외하지 않고 누락 처리", len(excluded))
+        for ticker, reason in excluded.items():
+            missing[ticker] = f"거래 종료 판정 과다({len(excluded)}종목) — 데이터 소스 이상 가능: {reason}"
+        excluded = {}
     prices = pd.DataFrame(records)
     collection = UsCollection(
         prices=prices, missing=missing,
@@ -157,6 +244,7 @@ def download_market_data(
         mismatch_count=int(prices["mismatch"].sum()) if not prices.empty else 0,
         cross_checked_count=int(prices["cross_checked"].sum()) if not prices.empty else 0,
         source_stats={"Nasdaq": _stats(secondary), "CNBC": _stats(tertiary)},
+        excluded=excluded, renamed=renamed, transitions=transitions,
     )
     nasdaq_stale = collection.source_stats["Nasdaq"].get("STALE_SOURCE", 0)
     if nasdaq_stale:

@@ -45,6 +45,17 @@ def parse(payload: dict, session_date: date, previous_date: date | None = None) 
         symbol = str(quote.get("symbol") or "").upper()
         if not symbol:
             continue
+        if quote.get("code") not in (0, "0", None):
+            observations[symbol] = failed(symbol, SOURCE, "CNBC 심볼 미인식(티커 변경·상장폐지 가능)",
+                                          symbol_unknown=True)
+            continue
+        country, currency = quote.get("countryCode"), quote.get("currencyCode")
+        if (country and country != "US") or (currency and currency != "USD"):
+            # The same ticker can belong to another market's company (WBD -> Webuild SpA, IT/EUR).
+            observations[symbol] = failed(
+                symbol, SOURCE, f"CNBC가 다른 시장 종목으로 연결({quote.get('name')}, {country}/{currency})",
+                symbol_unknown=True)
+            continue
         raw_date = str(quote.get("last_time") or "")[:10]
         try:
             quote_date = date.fromisoformat(raw_date)
@@ -68,7 +79,8 @@ def parse(payload: dict, session_date: date, previous_date: date | None = None) 
         previous_value = positive(quote.get("previous_day_closing"))
         if close.status == OK and previous_date is not None and previous_value is not None:
             previous = FieldValue(previous_value, previous_date, OK, corroborative=True)
-        observations[symbol] = PriceObservation(symbol, SOURCE, close=close, previous_close=previous)
+        observations[symbol] = PriceObservation(symbol, SOURCE, close=close, previous_close=previous,
+                                                latest_date=quote_date if value is not None else None)
     return observations
 
 

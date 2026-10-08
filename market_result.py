@@ -48,6 +48,9 @@ CATEGORY_TEXT = {
     "CALENDAR": "거래일 안내",
     "SOURCE": "데이터 소스 장애",
     "NOTICE": "참고",
+    "LISTING_ENDED": "거래 종료 종목 제외(인수·상장폐지 추정)",
+    "TICKER_CHANGE": "티커 변경 추정(새 티커로 분석)",
+    "LISTING_CHANGE": "티커 변경·상장폐지 추정(확인 필요)",
 }
 
 
@@ -177,6 +180,11 @@ def issues_from_prices(prices: pd.DataFrame, code_column: str, validation_band_p
         code, name, severity = row[code_column], row.get("company_name", ""), row.get("severity", NORMAL)
         note = row.get("note") or ""
         in_band = min(row["change_pct"], row.get("alt_change_pct") if pd.notna(row.get("alt_change_pct")) else row["change_pct"]) <= validation_band_pct
+        listing_note = row.get("listing_note") if isinstance(row.get("listing_note"), str) else ""
+        if listing_note:
+            level = WARNING if severity == WARNING else INFO
+            issues.append(Issue(level, "TICKER_CHANGE", f"{listing_note}; {row.get('validation', '')}", code, name))
+            continue
         special = row.get("special_label") or ""
         if special == "SPECIAL_TRADING_VALIDATED":
             issues.append(Issue(INFO, "SPECIAL_TRADING", row.get("special_note") or "특수거래 확인", code, name))

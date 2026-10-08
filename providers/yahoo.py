@@ -9,6 +9,7 @@ next day's KRX base price: 913/913 on 2026-09-29).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -61,7 +62,19 @@ def _result(payload: dict, symbol: str, timezone_name: str) -> dict:
         raise ValueError(f"응답 ticker 불일치 ({meta.get('symbol')} != {symbol})")
     if (meta.get("exchangeTimezoneName") or timezone_name) != timezone_name:
         raise ValueError(f"unexpected exchange timezone ({meta.get('exchangeTimezoneName')})")
+    expected_currency = "USD" if timezone_name == "America/New_York" else "KRW"
+    if meta.get("currency") and meta["currency"] != expected_currency:
+        raise ValueError(f"unexpected currency ({meta['currency']})")
     return result
+
+
+def last_trade_date(payload: dict, zone: ZoneInfo) -> date | None:
+    """Date of the last regular trade Yahoo knows for the symbol (listing evidence)."""
+    try:
+        timestamp = payload["chart"]["result"][0]["meta"].get("regularMarketTime")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).astimezone(zone).date() if timestamp else None
 
 
 def parse_us_chart(payload: dict, ticker: str) -> dict[date, Bar]:
@@ -175,6 +188,8 @@ def fetch_us(ticker: str, previous_date: date, session_date: date, settings: Set
         return failed(ticker, SOURCE, f"Yahoo 응답 거부: {exc}", INVALID_PRICE)
     observation = observation_from_bars(ticker, bars, previous_date, session_date)
     observation.note = split_note(payload, previous_date, session_date, NEW_YORK)
+    known = [day for day in (observation.latest_date, last_trade_date(payload, NEW_YORK)) if day]
+    observation.latest_date = max(known) if known else None
     return observation
 
 
@@ -191,3 +206,52 @@ def fetch_kr(code: str, previous_date: date, session_date: date, settings: Setti
         observation.volume = bars[session_date].volume
     observation.note = split_note(payload, previous_date, session_date, SEOUL)
     return observation
+
+
+# ---------------------------------------------------------------------------
+# Ticker changes (e.g. PSKY -> SKYD after a merger): find the successor symbol
+# by company name on a US exchange. Used only when the old symbol has no
+# analysis-day trade anywhere and at least one source no longer knows it.
+SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS"}
+_NAME_NOISE = {"inc", "incorporated", "corp", "corporation", "co", "company", "ltd", "limited", "plc", "the",
+               "class", "a", "b", "c", "com", "common", "stock", "shares", "holdings", "group", "sa", "nv", "ag"}
+
+
+def normalize_company_name(name: str | None) -> str:
+    text = re.sub(r"\([^)]*\)", " ", str(name or "").lower().replace("&", " and "))
+    words = re.findall(r"[a-z0-9]+", text)
+    return " ".join(word for word in words if word not in _NAME_NOISE)
+
+
+def company_names_match(first: str | None, second: str | None) -> bool:
+    a, b = normalize_company_name(first), normalize_company_name(second)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = sorted((a, b), key=len)
+    return len(shorter) >= 5 and f" {shorter} " in f" {longer} "
+
+
+def find_successor_symbols(ticker: str, company_name: str, exclude: set[str],
+                           settings: Settings = SETTINGS) -> list[str]:
+    """US equity symbols whose company name matches, excluding the old ticker and
+    other current constituents (so a sibling share class is never picked)."""
+    found: list[str] = []
+    for query in (company_name, ticker):
+        try:
+            payload = get_with_retry(SEARCH_URL, params={"q": query, "quotesCount": 10, "newsCount": 0},
+                                     headers=HEADERS, settings=settings, attempts=2).json()
+        except Exception as exc:
+            LOGGER.warning("Yahoo 검색 실패(%s): %s", query, exc)
+            continue
+        for quote in payload.get("quotes") or []:
+            symbol = str(quote.get("symbol") or "").upper()
+            if (quote.get("quoteType") != "EQUITY" or quote.get("exchange") not in US_EXCHANGES
+                    or not re.fullmatch(r"[A-Z]{1,5}", symbol) or symbol == ticker.upper()
+                    or symbol in exclude or symbol in found):
+                continue
+            if any(company_names_match(company_name, quote.get(key)) for key in ("shortname", "longname")):
+                found.append(symbol)
+    return found[:3]

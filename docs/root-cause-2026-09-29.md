@@ -116,3 +116,24 @@ python main.py --dry-run
 | 상태 | INFO | INFO |
 
 제목: `[급락 모니터] S&P500 1개 · KOSPI 13개` (DATA WARNING 없음).
+
+
+---
+
+# 2026-10-08 07:38 KST 메일: "데이터 누락 US 2건" (WBD, PSKY)
+
+## 원인
+- **WBD**: Paramount Skydance의 인수 완료로 2026-10-05가 마지막 거래일. 10-06·10-07 거래가 없는데 위키피디아
+  목록에 남아 있어 "데이터 누락" WARNING이 됨. 거래가 없으니 급락도 불가능 → 오탐 경고.
+- **PSKY**: 회사명 Skydance Corporation, 티커 SKYD(NYSE)로 변경. 실행 시점에 Nasdaq·CNBC는 PSKY를 모르고
+  Yahoo는 PSKY의 10-07 봉이 없었음. 실제 10-07 종가 8.89(-6.72%)가 SKYD로 존재 → 티커 변경 종목을 놓치면
+  실제 급락도 놓칠 수 있는 구조적 위험.
+- **추가 위험**: CNBC가 WBD를 이탈리아 Webuild SpA(EUR)로 연결. 다른 회사 가격이 섞일 수 있음.
+- 위키피디아 목록은 10-08 중에 SKYD·MRNA로 갱신됨(약 하루 지연).
+
+## 수정
+- 소스별 근거 추가: 마지막 거래일(`latest_date`), 심볼 미인식(`symbol_unknown`, Nasdaq 1001 / CNBC code≠0).
+- `listing_gap`: 거래 종료(제외, INFO) / 티커 변경 추정(회사명으로 새 티커 탐색 후 분석, INFO) / 미해결(WARNING) 판정.
+- CNBC는 미국·USD 종목만 사용, Yahoo도 통화 확인.
+- 회귀 테스트 `tests/test_listing_changes.py`(실제 응답 고정): WBD 제외, PSKY→SKYD 추적(8.89, -6.72%),
+  미해결 시 원인 명시 WARNING, 거래 종료 판정 과다 시 제외하지 않음.

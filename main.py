@@ -86,9 +86,16 @@ def _log_summary(result: MarketResult, candidate_count: int) -> None:
         LOGGER.info("[%s] SOURCE %s", result.market, note)
 
 
-def _missing_issues(missing: dict[str, str], names: dict[str, str]) -> tuple[dict[str, str], list[Issue]]:
-    keyed = {f"{code} {names.get(code, '')}".strip(): reason for code, reason in sorted(missing.items())}
-    issues = [Issue(WARNING, "MISSING", reason, code, names.get(code, "")) for code, reason in sorted(missing.items())]
+def _missing_issues(missing: dict[str, str], names: dict[str, str],
+                    transitions: dict[str, str] | None = None) -> tuple[dict[str, str], list[Issue]]:
+    """Missing symbols are WARNING; a symbol that vanished from every source (ticker
+    change/delisting not yet reflected in the constituent list) says so explicitly."""
+    transitions = transitions or {}
+    keyed = {f"{code} {names.get(code, '')}".strip(): transitions.get(code, reason)
+             for code, reason in sorted(missing.items())}
+    issues = [Issue(WARNING, "LISTING_CHANGE" if code in transitions else "MISSING",
+                    transitions.get(code, reason), code, names.get(code, ""))
+              for code, reason in sorted(missing.items())]
     return keyed, issues
 
 
@@ -102,7 +109,9 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
     prices = collection.prices
 
     names = constituents.set_index("yahoo_ticker")["company_name"].to_dict()
-    missing, issues = _missing_issues(collection.missing, names)
+    missing, issues = _missing_issues(collection.missing, names, collection.transitions)
+    issues += [Issue(INFO, "LISTING_ENDED", reason, ticker, names.get(ticker, ""))
+               for ticker, reason in sorted(collection.excluded.items())]
     price_issues, price_notes = issues_from_prices(prices, "ticker", SETTINGS.us_validation_band_pct)
     issues += price_issues
     if constituents.attrs.get("warning"):
@@ -125,7 +134,10 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
         market="US", title=US_TITLE, threshold_pct=SETTINGS.drop_threshold_pct, code_column="ticker",
         currency="USD", source="Yahoo 정규장 일봉 · 교차검증 Nasdaq/CNBC", prices=prices,
         session_date=context.session_date, previous_session_date=context.previous_session_date,
-        total_count=len(constituents), analyzed_count=len(prices), candidates=candidates, missing=missing,
+        # Symbols with no trade on either session (merger completed, delisted)
+        # are not part of today's analyzable universe.
+        total_count=len(constituents) - len(collection.excluded), analyzed_count=len(prices),
+        candidates=candidates, missing=missing,
         fallback_count=collection.fallback_count, mismatch_count=collection.mismatch_count,
         cross_checked_count=collection.cross_checked_count, issues=issues,
         source_notes=collection.notices + price_notes,
