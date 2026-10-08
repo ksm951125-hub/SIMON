@@ -59,6 +59,31 @@ def _source_text(row: pd.Series, result: MarketResult) -> str:
     return f"{source} · {validation}" if isinstance(validation, str) and validation else source
 
 
+# Exchange-designated states shown next to the stock name (display only).
+TAG_COLORS = {"정리매매": ("#fee2e2", "#991b1b"), "상장폐지": ("#fee2e2", "#991b1b"), "거래정지": ("#fee2e2", "#991b1b"),
+              "관리종목": ("#fef3c7", "#92400e"), "신규상장": ("#dbeafe", "#1e40af")}
+
+
+def _state_tags(row: pd.Series) -> list[str]:
+    value = row.get("state_tags")
+    return [tag for tag in (part.strip() for part in value.split(",")) if tag] if isinstance(value, str) else []
+
+
+def _badges(row: pd.Series) -> str:
+    html = ""
+    for tag in _state_tags(row):
+        background, color = TAG_COLORS.get(tag, ("#e2e8f0", "#334155"))
+        html += (f'<span style="display:inline-block;margin:0 0 0 5px;padding:1px 6px;border-radius:9px;'
+                 f'background:{background};color:{color};font-size:10px;line-height:14px;font-weight:bold;'
+                 f'white-space:nowrap;">{escape(tag)}</span>')
+    return html
+
+
+def _company_text(row: pd.Series) -> str:
+    tags = _state_tags(row)
+    return f"{row['company_name']} [{', '.join(tags)}]" if tags else str(row["company_name"])
+
+
 STATUS_TAGS = {
     "CROSS_VALIDATED": "✓", "FALLBACK_VALIDATED": "대체✓", "PRIMARY_ONLY": "단일",
     "FALLBACK_UNVERIFIED": "대체·미검증", "CROSS_SOURCE_MISMATCH": "불일치",
@@ -121,7 +146,7 @@ def build_plain_text_report(us: MarketResult, kr: MarketResult, executed_at_kst:
                           "|---|---|---:|---:|---:|---|"])
             for _, row in result.candidates.iterrows():
                 lines.append(
-                    f"| {row[result.code_column]} | {row['company_name']} | "
+                    f"| {row[result.code_column]} | {_company_text(row)} | "
                     f"{_market_price(row['previous_close'], result.currency)} | "
                     f"{_market_price(row['close'], result.currency)} | "
                     f"{row['change_pct']:+.2f}% | {_source_text(row, result)} |"
@@ -189,7 +214,7 @@ def _candidate_rows(result: MarketResult) -> str:
         rows.append(
             f"""<tr class="candidate-row">
               <td class="c-code" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:bold;color:#0f172a;white-space:nowrap;">{code}</td>
-              <td class="c-company" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;line-height:17px;color:#334155;word-break:break-word;overflow-wrap:anywhere;">{company}{note_html}</td>
+              <td class="c-company" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;line-height:17px;color:#334155;word-break:break-word;overflow-wrap:anywhere;">{company}{_badges(row)}{note_html}</td>
               <td class="c-prev" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#475569;white-space:nowrap;">{previous}</td>
               <td class="c-close" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#0f172a;white-space:nowrap;">{close}</td>
               <td class="c-change" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:bold;color:#b91c1c;white-space:nowrap;">&#9660;&nbsp;{change:.2f}%</td>
@@ -215,7 +240,7 @@ def _tail_table(result: MarketResult, limit: int) -> str:
         try:
             rows.append(
                 f'<tr style="border-bottom:1px solid #eef2f7"><td><b>{escape(str(row[result.code_column]))}</b> '
-                f'{escape(str(row["company_name"]))}</td>'
+                f'{escape(str(row["company_name"]))}{_badges(row)}</td>'
                 f'<td align="right" nowrap>{_html_price(float(row["previous_close"]), result.currency)} &#8594; '
                 f'{_html_price(float(row["close"]), result.currency)}</td>'
                 f'<td align="right" nowrap><b style="color:#b91c1c">&#9660;&nbsp;{float(row["change_pct"]):.2f}%</b></td></tr>')
@@ -394,6 +419,7 @@ def _render_html(us: MarketResult, kr: MarketResult, executed_at_kst: datetime, 
       &#8226; 시장별 표시된 분석일/이전 거래일(각 거래소 실제 거래일)을 기준으로 생성됩니다.<br>
       &#8226; 등락률은 직전 거래일 정규장 종가 대비 분석일 정규장 종가 기준입니다(시간외·프리/애프터마켓 제외).<br>
       &#8226; Valid Prices는 양일 정규장 종가를 확보한 종목 수이며, Coverage = Valid Prices / Listing 입니다.<br>
+      &#8226; 종목명 옆 배지(정리매매·관리종목 등)는 분석일 기준 거래소 지정 상태입니다. 정리매매 종목은 가격제한폭이 없어 급락폭이 크게 나타날 수 있습니다.<br>
       &#8226; 상태: NORMAL 정상 · INFO 참고사항만 있음(정상 처리) · WARNING 검증 부족 · ERROR 핵심 데이터 확보 실패
     </td></tr>
     <tr><td align="center" style="padding:18px 0 8px;font-size:10px;letter-spacing:.4px;color:#94a3b8;">Automated Market Drop Monitor</td></tr>

@@ -25,7 +25,7 @@ from market_calendar import KST
 from net import Budget, FailFast, retry_until_available
 from providers import daum, krx_official, naver, yahoo
 from providers.base import INVALID_PRICE, NOT_PROVIDED, OK, UNAVAILABLE, FieldValue, PriceObservation, failed
-from special_trading import SPECIAL_TRADING_UNCONFIRMED, SPECIAL_TRADING_VALIDATED, assess_kr_move
+from special_trading import SPECIAL_TRADING_UNCONFIRMED, SPECIAL_TRADING_VALIDATED, assess_kr_move, state_tags
 from validation import INFO, NORMAL, WARNING, assess
 
 LOGGER = logging.getLogger(__name__)
@@ -429,7 +429,8 @@ def download_kospi_market_data(
         row.update(note="; ".join(notes), outliers="; ".join(row["outliers"]),
                    stale_sources=",".join(row["stale_sources"]), special_label=move.label,
                    special_note=move.note, special_reasons=", ".join(move.reasons),
-                   krx_base_price=base, nxt_tradable=None if state is None else state.nxt_tradable)
+                   krx_base_price=base, nxt_tradable=None if state is None else state.nxt_tradable,
+                   state_tags=", ".join(state_tags(state, session_date, next_session)))
         if validator is not None and row["detected"]:
             try:
                 validator.validate(code, previous_date, session_date, row["previous_close"], row["close"])

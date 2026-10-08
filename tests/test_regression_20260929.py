@@ -133,6 +133,7 @@ def test_005030_special_trading_is_validated_not_a_data_error(monkeypatch):
     assert (row.previous_close, row.close) == (486, 37)
     assert row.change_pct == pytest.approx(-92.3868, abs=1e-4) and row.detected
     assert row.special_label == "SPECIAL_TRADING_VALIDATED" and "정리매매" in row.special_reasons
+    assert row.state_tags == "정리매매"  # shown next to the name in the mail (display only)
     assert row.validation_status == "FALLBACK_VALIDATED"  # prev from 2 KRX-base sources, close from 3
     assert "근사치" not in row.note
     assert result.status == INFO and not result.data_warning_issues
@@ -150,3 +151,4 @@ def test_mail_for_2026_09_29_has_no_contradictory_warning(monkeypatch):
     assert "누락·대체·불일치" not in html
     assert "참고 (정상 처리) · 3건" in html
     assert "특수거래" in html and "FICO" in html and "부산주공" in html
+    assert ">정리매매</span>" in html and "부산주공 [정리매매]" in plain

@@ -215,7 +215,9 @@ def issues_from_prices(prices: pd.DataFrame, code_column: str, validation_band_p
         if special_note:
             note = note.replace(f"; {special_note}", "").replace(special_note, "")
         if severity == WARNING or in_band:
-            issues.append(Issue(severity, category, f"{row.get('validation', '')}: {note}".strip(": "), code, name))
+            # The move itself leads the text: a near-threshold notice is otherwise just two prices.
+            move = f"등락 {row['change_pct']:+.2f}% · " if pd.notna(row["change_pct"]) else ""
+            issues.append(Issue(severity, category, move + f"{row.get('validation', '')}: {note}".strip(": "), code, name))
         else:
             aggregated[category] = aggregated.get(category, 0) + 1
     valid = len(prices)

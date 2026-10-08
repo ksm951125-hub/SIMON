@@ -79,6 +79,29 @@ def special_reasons(state: MarketState | None, session_date: date) -> list[str]:
     return reasons
 
 
+def state_tags(state: MarketState | None, session_date: date, next_session: date | None = None) -> list[str]:
+    """Short market-state labels shown next to a detected stock (display only).
+
+    The state must be dated the analysis day, or the next session when the source
+    snapshot already rolled over (these flags do not change overnight); anything
+    else (e.g. today's snapshot while replaying an old date) never labels a stock.
+    정리매매 stocks are always 관리종목 too, so only the more specific label is shown."""
+    if state is None or state.as_of is None or state.as_of not in (session_date, next_session):
+        return []
+    tags = []
+    if state.delisted:
+        tags.append("상장폐지")
+    if state.pre_delisting_trading:
+        tags.append("정리매매")
+    if state.trading_suspended:
+        tags.append("거래정지")
+    if state.administrative_issue and not (state.pre_delisting_trading or state.delisted):
+        tags.append("관리종목")
+    if state.listing_date and 0 <= (session_date - state.listing_date).days <= NEW_LISTING_WINDOW_DAYS:
+        tags.append("신규상장")
+    return tags
+
+
 def assess_kr_move(previous_close: float, close: float, base_price: float | None, state: MarketState | None,
                    session_date: date) -> PriceMoveAssessment:
     """Decide whether a KOSPI close is consistent with the applicable price-limit rule."""
