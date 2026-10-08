@@ -11,6 +11,9 @@ def _worker(connection, function, argument):
     try:
         connection.send((True, function(argument)))
     except Exception as exc:
+        # The traceback only exists in this child process: log it so the Actions
+        # log shows where it failed, and pass a short message to the parent.
+        logging.getLogger(__name__).exception("market worker failed")
         connection.send((False, f"{type(exc).__name__}: {exc}"))
     finally:
         connection.close()

@@ -1,0 +1,30 @@
+# Exact versions of every package (direct and transitive) resolved for Python 3.12 on Linux
+# (pip install --dry-run --report, 2026-10-09). Used only as a constraint file so a new
+# upstream release can never change what the daily job runs:
+#   pip install -r requirements.txt -c constraints.txt
+# Update deliberately together with requirements.txt after unit + live checks.
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+charset-normalizer==3.5.2
+colorama==0.4.6
+exchange-calendars==4.13.2
+idna==3.20
+iniconfig==2.3.1
+korean-lunar-calendar==0.4.0
+numpy==2.3.5
+packaging==26.3
+pandas==2.3.3
+pandas-market-calendars==5.4.0
+pluggy==1.6.0
+pygments==2.21.0
+pyluach==2.3.0
+pytest==8.4.2
+python-dateutil==2.9.0.post0
+pytz==2026.5
+requests==2.34.2
+six==1.17.0
+soupsieve==2.10
+toolz==1.2.0
+typing-extensions==4.16.0
+tzdata==2026.5
+urllib3==2.8.0

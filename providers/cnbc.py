@@ -24,7 +24,7 @@ from datetime import date
 from config import SETTINGS, Settings
 from net import get_with_retry
 from providers.base import (INVALID_PRICE, NOT_PROVIDED, OK, STALE_SOURCE, UNAVAILABLE, FieldValue,
-                            PriceObservation, failed, positive)
+                            PriceObservation, failed, internal_error, positive)
 
 SOURCE = "CNBC"
 URL = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
@@ -42,46 +42,48 @@ def parse(payload: dict, session_date: date, previous_date: date | None = None) 
         quotes = [quotes]
     observations: dict[str, PriceObservation] = {}
     for quote in quotes:
-        symbol = str(quote.get("symbol") or "").upper()
-        if not symbol:
-            continue
-        if quote.get("code") not in (0, "0", None):
-            observations[symbol] = failed(symbol, SOURCE, "CNBC 심볼 미인식(티커 변경·상장폐지 가능)",
-                                          symbol_unknown=True)
-            continue
-        country, currency = quote.get("countryCode"), quote.get("currencyCode")
-        if (country and country != "US") or (currency and currency != "USD"):
-            # The same ticker can belong to another market's company (WBD -> Webuild SpA, IT/EUR).
-            observations[symbol] = failed(
-                symbol, SOURCE, f"CNBC가 다른 시장 종목으로 연결({quote.get('name')}, {country}/{currency})",
-                symbol_unknown=True)
-            continue
-        raw_date = str(quote.get("last_time") or "")[:10]
+        symbol = ""
         try:
-            quote_date = date.fromisoformat(raw_date)
-        except ValueError:
-            observations[symbol] = failed(symbol, SOURCE, f"CNBC 날짜 해석 불가 ({raw_date!r})", INVALID_PRICE)
-            continue
-        value = positive(quote.get("last"))
-        extended_type = str((quote.get("ExtendedMktQuote") or {}).get("type") or "")
-        rolled = (quote.get("curmktstatus") == "PRE_MKT" or extended_type.endswith("_PREV")
-                  or (value is not None and positive(quote.get("previous_day_closing")) == value))
-        if quote_date == session_date and rolled:
-            close = FieldValue(date=quote_date, status=STALE_SOURCE,
-                               detail="익일 세션으로 전환된 스냅샷(배당락 조정 가능)")
-        elif quote_date != session_date:
-            close = FieldValue(date=quote_date, status=STALE_SOURCE, detail=f"{session_date} 아님 ({quote_date})")
-        elif value is None:
-            close = FieldValue(date=quote_date, status=INVALID_PRICE, detail="last 비정상")
-        else:
-            close = FieldValue(value, quote_date, OK)
-        previous = FieldValue(status=NOT_PROVIDED)
-        previous_value = positive(quote.get("previous_day_closing"))
-        if close.status == OK and previous_date is not None and previous_value is not None:
-            previous = FieldValue(previous_value, previous_date, OK, corroborative=True)
-        observations[symbol] = PriceObservation(symbol, SOURCE, close=close, previous_close=previous,
-                                                latest_date=quote_date if value is not None else None)
+            symbol = str(quote.get("symbol") or "").upper()
+            if symbol:
+                observations[symbol] = _parse_quote(quote, symbol, session_date, previous_date)
+        except Exception as exc:  # one malformed quote must not discard the other 99
+            if symbol:
+                observations[symbol] = internal_error(symbol, SOURCE, exc)
     return observations
+
+
+def _parse_quote(quote: dict, symbol: str, session_date: date, previous_date: date | None) -> PriceObservation:
+    if quote.get("code") not in (0, "0", None):
+        return failed(symbol, SOURCE, "CNBC 심볼 미인식(티커 변경·상장폐지 가능)", symbol_unknown=True)
+    country, currency = quote.get("countryCode"), quote.get("currencyCode")
+    if (country and country != "US") or (currency and currency != "USD"):
+        # The same ticker can belong to another market's company (WBD -> Webuild SpA, IT/EUR).
+        return failed(symbol, SOURCE, f"CNBC가 다른 시장 종목으로 연결({quote.get('name')}, {country}/{currency})",
+                      symbol_unknown=True)
+    raw_date = str(quote.get("last_time") or "")[:10]
+    try:
+        quote_date = date.fromisoformat(raw_date)
+    except ValueError:
+        return failed(symbol, SOURCE, f"CNBC 날짜 해석 불가 ({raw_date!r})", INVALID_PRICE)
+    value = positive(quote.get("last"))
+    extended_type = str((quote.get("ExtendedMktQuote") or {}).get("type") or "")
+    rolled = (quote.get("curmktstatus") == "PRE_MKT" or extended_type.endswith("_PREV")
+              or (value is not None and positive(quote.get("previous_day_closing")) == value))
+    if quote_date == session_date and rolled:
+        close = FieldValue(date=quote_date, status=STALE_SOURCE, detail="익일 세션으로 전환된 스냅샷(배당락 조정 가능)")
+    elif quote_date != session_date:
+        close = FieldValue(date=quote_date, status=STALE_SOURCE, detail=f"{session_date} 아님 ({quote_date})")
+    elif value is None:
+        close = FieldValue(date=quote_date, status=INVALID_PRICE, detail="last 비정상")
+    else:
+        close = FieldValue(value, quote_date, OK)
+    previous = FieldValue(status=NOT_PROVIDED)
+    previous_value = positive(quote.get("previous_day_closing"))
+    if close.status == OK and previous_date is not None and previous_value is not None:
+        previous = FieldValue(previous_value, previous_date, OK, corroborative=True)
+    return PriceObservation(symbol, SOURCE, close=close, previous_close=previous,
+                            latest_date=quote_date if value is not None else None)
 
 
 def fetch_batch(tickers: list[str], session_date: date, settings: Settings = SETTINGS,
@@ -107,4 +109,7 @@ def fetch_batch(tickers: list[str], session_date: date, settings: Settings = SET
             if observation.previous_close.status != OK:
                 observation.previous_close = FieldValue(status=NOT_PROVIDED)
             results[ticker] = observation
+    # Every requested ticker gets an answer, whatever happened to a chunk.
+    for ticker in tickers:
+        results.setdefault(ticker, failed(ticker, SOURCE, "CNBC 처리 누락", UNAVAILABLE))
     return results

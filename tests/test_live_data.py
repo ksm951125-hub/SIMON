@@ -32,7 +32,7 @@ def test_cnbc_answers_with_dated_regular_quote():
 def test_kr_yahoo_previous_close_matches_naver_and_daum_krx_base():
     previous, session = date(2026, 9, 28), date(2026, 9, 29)
     primary = yahoo.fetch_kr("096770", previous, session, SETTINGS)
-    base, _ = naver.fetch_daily("096770", previous, session, SETTINGS)
+    base, _, _ = naver.fetch_daily("096770", previous, session, SETTINGS, page_size=60)
     days = daum.fetch_days("096770", previous, session, SETTINGS)
     assert primary.previous_close.value == base.previous_close.value == days.previous_close.value == 158200
 

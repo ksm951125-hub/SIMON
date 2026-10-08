@@ -18,7 +18,7 @@ from datetime import date
 from config import SETTINGS, Settings
 from net import get_with_retry
 from providers.base import (INTEGRATED, NOT_PROVIDED, OK, REGULAR, STALE_SOURCE, FieldValue, PriceObservation, failed,
-                            positive)
+                            never_raises, positive)
 
 SOURCE = "Naver"
 PRICE_URL = "https://m.stock.naver.com/api/stock/{code}/price"
@@ -94,6 +94,7 @@ def next_session_close(code: str, days: dict[date, NaverDay], session_date: date
                             previous_close=FieldValue(status=NOT_PROVIDED))
 
 
+@never_raises(SOURCE, extras=2)
 def fetch_daily(code: str, previous_date: date, session_date: date, settings: Settings = SETTINGS,
                 page_size: int = 10, next_session: date | None = None
                 ) -> tuple[PriceObservation, NaverDay | None, PriceObservation | None]:

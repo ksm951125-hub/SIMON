@@ -22,9 +22,9 @@ import pandas_market_calendars as mcal
 
 from config import SETTINGS, Settings
 from market_calendar import KST
-from net import retry_until_available
+from net import Budget, FailFast, retry_until_available
 from providers import daum, krx_official, naver, yahoo
-from providers.base import NOT_PROVIDED, OK, FieldValue, PriceObservation
+from providers.base import INVALID_PRICE, NOT_PROVIDED, OK, UNAVAILABLE, FieldValue, PriceObservation, failed
 from special_trading import SPECIAL_TRADING_UNCONFIRMED, SPECIAL_TRADING_VALIDATED, assess_kr_move
 from validation import INFO, NORMAL, WARNING, assess
 
@@ -49,6 +49,8 @@ class KospiSessionContext:
     previous_session_date: date
     warning: str | None = None
     warning_level: str = "WARNING"
+    # Informational: e.g. "market closed on the expected day, latest session re-analyzed".
+    notice: str | None = None
 
 
 @dataclass
@@ -59,6 +61,7 @@ class KrCollection:
     mismatch_count: int = 0
     cross_checked_count: int = 0
     notices: list[str] = field(default_factory=list)
+    health: list[str] = field(default_factory=list)
 
 
 def _json(url: str, params: dict, settings: Settings = SETTINGS):
@@ -70,6 +73,14 @@ def _json(url: str, params: dict, settings: Settings = SETTINGS):
 # --------------------------------------------------------------------------
 def _xkrx_sessions(start: date, end: date) -> list[date]:
     return list(mcal.get_calendar("XKRX").schedule(start_date=start, end_date=end).index.date)
+
+
+def _closed_notice(requested: date | None, expected: date, analyzed: date) -> str | None:
+    """INFO text when the exchange was closed on the expected day (holiday/weekend)."""
+    if requested is not None or analyzed >= expected:
+        return None
+    return (f"한국 시장 휴장(거래 없음): 기대 거래일 {expected}에 거래가 없어 최근 거래일 {analyzed} 기준으로 다시 분석 "
+            "(이전 메일과 같은 거래일일 수 있음)")
 
 
 def get_kospi_session_context(session_date: date | None = None, now: datetime | None = None,
@@ -109,7 +120,8 @@ def get_kospi_session_context(session_date: date | None = None, now: datetime | 
         previous = max(day for day in calendar if day < current)
         LOGGER.warning("[KR] 지수 이력 조회 실패 → XKRX 캘린더 사용: %s", exc)
         # The exchange calendar alone is a reliable basis: informational only.
-        return KospiSessionContext(current, previous, f"KOSPI 지수 이력 조회 실패, XKRX 캘린더로 거래일 판정 ({exc})", "INFO")
+        return KospiSessionContext(current, previous, f"KOSPI 지수 이력 조회 실패, XKRX 캘린더로 거래일 판정 ({exc})", "INFO",
+                                   _closed_notice(session_date, end, current))
 
     eligible = sorted(day for day in traded if day <= end)
     if session_date is not None:
@@ -129,7 +141,7 @@ def get_kospi_session_context(session_date: date | None = None, now: datetime | 
     if calendar_pair != [previous, current]:
         warning = (f"KRX 캘린더와 지수 거래일 불일치: 지수 ({previous}, {current}) / 캘린더 {calendar_pair} "
                    "— 임시휴장·공급 지연 확인 필요")
-    return KospiSessionContext(current, previous, warning)
+    return KospiSessionContext(current, previous, warning, notice=_closed_notice(session_date, end, current))
 
 
 # --------------------------------------------------------------------------
@@ -233,12 +245,50 @@ def load_kospi_constituents(settings: Settings = SETTINGS) -> pd.DataFrame:
 #   OPTIONAL   KRX Open API (KRX_API_KEY), KIS (KIS_VALIDATE=1)
 # Naver/Daum "close" is the KRX+NXT integrated last trade and is never used as a
 # regular close for NXT-traded stocks.
+#
+# Fault isolation: adapters never raise; a provider that is down (consecutive
+# failures) or past its phase budget is skipped so the remaining symbols are
+# resolved by the other sources; a symbol that cannot be processed is reported
+# as missing instead of failing the market.
 PRICE_TOLERANCE_KRW = 0.5
+ON_DEMAND_BUDGET_SECONDS = 60.0
 
 
 def _xkrx_next_session(day: date) -> date | None:
     sessions = [session for session in _xkrx_sessions(day, day + timedelta(days=20)) if session > day]
     return sessions[0] if sessions else None
+
+
+def _reachable(observation: PriceObservation) -> bool:
+    """Did the provider answer (even "no data for that date")? Only transport/HTTP
+    failures count towards declaring a provider down."""
+    return observation.close.status != UNAVAILABLE or observation.symbol_unknown
+
+
+def _pool_map(function, symbols, workers: int, breaker: FailFast | None, source: str, extras: int = 0):
+    """Run an adapter over symbols in parallel with fail-fast protection.
+
+    ``extras`` is the number of additional None values in a tuple-returning
+    adapter's result (e.g. ``(observation, state)`` -> 1)."""
+    def blocked(symbol, reason, status):
+        observation = failed(symbol, source, reason, status)
+        return (observation, *([None] * extras)) if extras else observation
+
+    def call(symbol):
+        if breaker is not None:
+            reason = breaker.blocked()
+            if reason:
+                return blocked(symbol, reason, UNAVAILABLE)
+        try:
+            result = function(symbol)
+        except Exception as exc:  # adapters are isolated already; this is the second line of defense
+            return blocked(symbol, f"{source} 처리 오류: {type(exc).__name__}: {exc}", INVALID_PRICE)
+        if breaker is not None:
+            breaker.record(_reachable(result[0] if extras else result))
+        return result
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return dict(zip(symbols, executor.map(call, symbols)))
 
 
 def download_kospi_market_data(
@@ -256,32 +306,44 @@ def download_kospi_market_data(
     codes = constituents["code"].tolist()
     names = dict(zip(constituents["code"], constituents["company_name"]))
     notices: list[str] = []
+    health: list[str] = []
+    workers = settings.max_workers
     # Older manual sessions need more Naver history rows.
     page_size = 10 if (date.today() - session_date).days <= 7 else 60
 
-    def pool_map(function, symbols):
-        with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
-            return dict(zip(symbols, executor.map(function, symbols)))
+    started = time.monotonic()
+    primary_budget = Budget(settings.primary_budget_seconds)
+    yahoo_breakers: list[FailFast] = []
 
     def fetch_yahoo(symbols):
-        return pool_map(lambda code: yahoo.fetch_kr(code, previous_date, session_date, settings), symbols)
+        breaker = FailFast("Yahoo(KRX)", settings.provider_failure_threshold, primary_budget)
+        yahoo_breakers.append(breaker)
+        return _pool_map(lambda code: yahoo.fetch_kr(code, previous_date, session_date, settings), symbols, workers,
+                         breaker, "Yahoo")
 
-    started = time.monotonic()
     # Availability is judged on the analysis-day close only: a missing previous
     # close (e.g. halted the day before) is not "data not published yet".
     primary = retry_until_available(fetch_yahoo(codes), fetch_yahoo, lambda o: o.close.usable, settings,
-                                    "[KR] Yahoo(KRX)")
+                                    "[KR] Yahoo(KRX)", primary_budget)
+    health.extend(breaker.summary() for breaker in yahoo_breakers)
     stage = time.monotonic()
-    daum_quotes = pool_map(lambda code: daum.fetch_quote(code, previous_date, session_date, next_session, settings),
-                           codes)
-    naver_rows = pool_map(lambda code: naver.fetch_daily(code, previous_date, session_date, settings, page_size,
-                                                         next_session), codes)
+    secondary_budget = Budget(settings.secondary_budget_seconds)
+    daum_breaker = FailFast("Daum", settings.provider_failure_threshold, secondary_budget)
+    naver_breaker = FailFast("Naver", settings.provider_failure_threshold, secondary_budget)
+    daum_quotes = _pool_map(
+        lambda code: daum.fetch_quote(code, previous_date, session_date, next_session, settings), codes, workers,
+        daum_breaker, "Daum", extras=1)
+    naver_rows = _pool_map(
+        lambda code: naver.fetch_daily(code, previous_date, session_date, settings, page_size, next_session), codes,
+        workers, naver_breaker, "Naver", extras=2)
+    health.extend([daum_breaker.summary(), naver_breaker.summary()])
     daum_status: dict[str, int] = {}
     for observation, _state in daum_quotes.values():
         daum_status[observation.close.status] = daum_status.get(observation.close.status, 0) + 1
-    LOGGER.info("[KR] Yahoo(KRX) %.1fs 양일 유효 %d / %d | Daum 분석일 종가 상태 %s | Naver 기준가 %d (%.1fs)",
+    LOGGER.info("[KR] Yahoo(KRX) %.1fs 양일 유효 %d / %d | Daum 분석일 종가 상태 %s | Naver 기준가 %d (%.1fs) | %s",
                 stage - started, sum(o.close.usable and o.previous_close.usable for o in primary.values()), len(codes),
-                daum_status, sum(row[0].previous_close.usable for row in naver_rows.values()), time.monotonic() - stage)
+                daum_status, sum(row[0].previous_close.usable for row in naver_rows.values()), time.monotonic() - stage,
+                " / ".join(health))
 
     official: dict[str, PriceObservation] = {}
     if krx_client is not None:
@@ -323,23 +385,29 @@ def download_kospi_market_data(
 
     # Confirm previous closes that do not yet have two agreeing sources.
     def needs_days(code: str) -> bool:
-        values = [o.previous_close.value for o in observations_for(code, []) if o.previous_close.usable]
-        return not any(values.count(value) >= 2 for value in values) or not primary[code].close.usable
+        try:
+            values = [o.previous_close.value for o in observations_for(code, []) if o.previous_close.usable]
+            return not any(values.count(value) >= 2 for value in values) or not primary[code].close.usable
+        except Exception:  # noqa: BLE001 - a broken symbol is reported by the final loop
+            return False
 
     on_demand = [code for code in codes if needs_days(code)]
-    daum_days = pool_map(lambda code: daum.fetch_days(code, previous_date, session_date, settings), on_demand)
+    days_breaker = FailFast("Daum 일별", settings.provider_failure_threshold, Budget(ON_DEMAND_BUDGET_SECONDS))
+    daum_days = _pool_map(lambda code: daum.fetch_days(code, previous_date, session_date, settings), on_demand,
+                          workers, days_breaker, "Daum 일별")
     if on_demand:
-        LOGGER.info("[KR] Daum 일별 기준가 추가 조회 %d종목", len(on_demand))
+        LOGGER.info("[KR] Daum 일별 기준가 추가 조회 %d종목 | %s", len(on_demand), days_breaker.summary())
 
     records, missing = [], {}
-    for code in codes:
+
+    def process(code: str) -> None:
         observations = observations_for(code, [daum_days[code]] if code in daum_days else [])
         assessment = assess(code, observations, primary=yahoo.SOURCE, tolerance=PRICE_TOLERANCE_KRW,
                             threshold_pct=threshold_pct, validation_band_pct=settings.kr_validation_band_pct,
                             authoritative=krx_official.SOURCE if official else None)
         if not assessment.valid:
             missing[code] = assessment.reason
-            continue
+            return
         quote, state = daum_quotes[code]
         naver_day = naver_rows[code][1]
         base = (naver_day.krx_base_price if naver_day and naver_day.krx_base_price
@@ -366,16 +434,28 @@ def download_kospi_market_data(
             try:
                 validator.validate(code, previous_date, session_date, row["previous_close"], row["close"])
                 row["validation"] += " · KIS 일치"
-            except Exception as exc:
+            except ValueError as exc:  # KisMismatch: KIS answered with different closes (real disagreement)
                 row["mismatch"] = True
                 row["severity"] = WARNING
-                row["note"] = "; ".join(filter(None, [row["note"], f"KIS 검증: {exc}"]))
+                row["note"] = "; ".join(filter(None, [row["note"], f"KIS 검증 불일치: {exc}"]))
+            except Exception as exc:  # KIS unavailable (optional source): note only
+                row["note"] = "; ".join(filter(None, [row["note"], f"KIS 검증 불가: {exc}"]))
         records.append({"code": code, "company_name": names[code], "session_date": session_date,
                         "previous_session_date": previous_date, **row})
 
+    for code in codes:
+        try:
+            process(code)
+        except Exception as exc:  # one unprocessable stock must never fail the whole market
+            LOGGER.exception("[KR] %s 처리 중 내부 오류", code)
+            missing[code] = f"내부 처리 오류: {type(exc).__name__}: {exc}"
+
     prices = pd.DataFrame(records)
+    tripped = [line for line in health if "장애" in line or "소진" in line]
+    if tripped:
+        notices.append("데이터 소스 장애 감지: " + "; ".join(tripped))
     return KrCollection(
-        prices=prices, missing=missing, notices=notices,
+        prices=prices, missing=missing, notices=notices, health=health,
         fallback_count=int(prices["fallback"].sum()) if not prices.empty else 0,
         mismatch_count=int(prices["mismatch"].sum()) if not prices.empty else 0,
         cross_checked_count=int(prices["cross_checked"].sum()) if not prices.empty else 0,

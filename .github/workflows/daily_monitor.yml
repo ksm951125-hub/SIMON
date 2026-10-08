@@ -4,7 +4,7 @@ on:
   schedule:
     # 22:30 UTC Monday-Friday = 07:30 KST Tuesday-Saturday.
     # US: 18:30 EDT / 17:30 EST = 2.5h / 1.5h after the NYSE close (market_calendar
-    # DATA_READY_DELAY=1h; Nasdaq cross-checks closes).
+    # DATA_READY_DELAY=1h; Nasdaq/CNBC cross-check the closes).
     # KR: previous KRX session, closes final since ~16:30 KST.
     - cron: "30 22 * * 1-5"
   workflow_dispatch:
@@ -35,6 +35,8 @@ on:
 
 permissions:
   contents: read
+  # Only used by the keep-alive step below (re-enables this workflow's schedule).
+  actions: write
 
 concurrency:
   group: sp500-drop-monitor
@@ -42,7 +44,8 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
+    # Pinned: "ubuntu-latest" migrates to Ubuntu 26 on 2026-10-19; move deliberately after a dry run.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
@@ -55,21 +58,30 @@ jobs:
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt -c constraints.txt
 
+      # A failing unit test must never cost the daily mail: the monitor validates
+      # its own data. The run is still marked failed at the end (see the last step).
       - name: Run unit tests
+        id: tests
+        continue-on-error: true
         run: python -m pytest -q
 
       - name: Run monitor
+        id: monitor
+        timeout-minutes: 14
         env:
           INPUT_RECIPIENT: ${{ inputs.recipient_override }}
           INPUT_SEND_EMAIL: ${{ inputs.send_email }}
@@ -100,10 +112,74 @@ jobs:
           python main.py "${args[@]}"
 
       - name: Upload reports
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
         with:
           name: us-kospi-drop-report-${{ github.run_id }}
           path: output/
           if-no-files-found: warn
           retention-days: 90
+
+      # GitHub disables scheduled workflows of a public repository after 60 days
+      # without repository activity. Re-enabling the workflow each day is a
+      # best-effort guard (a commit every couple of months is the sure way).
+      - name: Keep schedule enabled
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/daily_monitor.yml/enable" || echo "::warning::schedule keep-alive request failed"
+
+      # Safety net: if the run ended without any report/alert mail (checkout, pip,
+      # SMTP outage, step timeout ...), send a plain alert. The monitor writes
+      # output/mail_sent.flag after a successful send, so there are no duplicates.
+      - name: Safety net - alert mail if no report was sent
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.send_email == true) }}
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          MONITOR_OUTCOME: ${{ steps.monitor.outcome }}
+          JOB_STATUS: ${{ job.status }}
+          INPUT_RECIPIENT: ${{ inputs.recipient_override }}
+        run: |
+          if [[ -f output/mail_sent.flag ]]; then
+            echo "report mail already sent; nothing to do"
+            exit 0
+          fi
+          python3 - <<'PY' || echo "::warning::safety-net mail could not be sent"
+          import os, smtplib, ssl
+          from email.message import EmailMessage
+          from email.utils import getaddresses
+
+          address = os.environ.get("GMAIL_ADDRESS", "")
+          password = "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split())
+          recipients = [a for _, a in getaddresses([os.environ.get("ALERT_EMAIL_RECIPIENT", "").replace(";", ",")]) if a]
+          override = os.environ.get("INPUT_RECIPIENT", "").strip()
+          if override:
+              recipients = [override]
+          if not (address and password and recipients):
+              raise SystemExit("mail secrets missing")
+          body = (
+              "급락 모니터 자동 실행이 리포트 메일 발송을 확인하지 못한 채 종료되었습니다.\n(드물게 리포트가 이미 도착했을 수도 있습니다. 받은편지함을 먼저 확인하세요.)\n\n"
+              f"- 실행 결과: job={os.environ['JOB_STATUS']}, monitor={os.environ['MONITOR_OUTCOME'] or 'skipped'}, "
+              f"tests={os.environ['TESTS_OUTCOME'] or 'skipped'}\n"
+              f"- 로그: {os.environ['RUN_URL']}\n\n"
+              "원인 확인 후 GitHub Actions에서 수동 실행(Run workflow)으로 다시 발송할 수 있습니다.\n"
+          )
+          message = EmailMessage()
+          message["Subject"] = "[급락 모니터][ERROR] 자동 실행 실패 - 리포트 발송 미확인"
+          message["From"] = address
+          message["To"] = ", ".join(recipients)
+          message.set_content(body)
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=ssl.create_default_context()) as smtp:
+              smtp.login(address, password)
+              smtp.send_message(message, from_addr=address, to_addrs=recipients)
+          print("safety-net alert sent to", len(recipients), "recipient(s)")
+          PY
+
+      - name: Fail the run if unit tests failed (the report mail was already sent)
+        if: ${{ !cancelled() && steps.tests.outcome == 'failure' }}
+        run: |
+          echo "::error::Unit tests failed. The monitor still ran and sent its report; fix the tests before the next change."
+          exit 1

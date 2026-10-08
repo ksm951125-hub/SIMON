@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 
 from config import SETTINGS, Settings
 from net import get_with_retry
-from providers.base import PriceObservation, failed, from_series, positive
+from providers.base import PriceObservation, failed, from_series, never_raises, positive
 
 SOURCE = "Nasdaq"
 URL = "https://api.nasdaq.com/api/quote/{symbol}/historical"
@@ -44,6 +44,7 @@ def parse(payload: dict) -> dict[date, float | None]:
     return series
 
 
+@never_raises(SOURCE)
 def fetch(ticker: str, previous_date: date, session_date: date, settings: Settings = SETTINGS) -> PriceObservation:
     params = {"assetclass": "stocks", "fromdate": (previous_date - timedelta(days=5)).isoformat(),
               "todate": (session_date + timedelta(days=1)).isoformat(), "limit": 20}

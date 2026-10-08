@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
@@ -10,6 +11,13 @@ import pandas as pd
 from market_result import CATEGORY_TEXT, ERROR, INFO, NORMAL, SKIPPED, WARNING, Issue, MarketResult
 
 MAX_WARNING_ITEMS = 30
+TOP_ROWS = 10                 # rows rendered with the full (rich) layout
+TAIL_ROWS = 100               # extra rows rendered as lean list rows
+# Gmail clips the HTML part of a message above ~102 KB (the tail disappears behind
+# "View entire message"); stay safely below it by shrinking the tail/issue lists.
+MAX_HTML_BYTES = 90_000
+# (tail rows, issue items) tried in order until the HTML fits.
+SIZE_STEPS = ((TAIL_ROWS, MAX_WARNING_ITEMS), (60, 15), (30, 8), (10, 4), (0, 2))
 
 
 def _money(value: float) -> str:
@@ -124,6 +132,9 @@ def build_plain_text_report(us: MarketResult, kr: MarketResult, executed_at_kst:
                     lines.append(f"  * {code}: {note}")
         elif result.status in {NORMAL, INFO, WARNING}:
             lines.append("기준 이하 급락 종목 없음")
+        if result.missing:
+            lines.extend(["", f"데이터 누락 상세 ({len(result.missing)}건):"])
+            lines.extend(f"- {code}: {reason}" for code, reason in sorted(result.missing.items()))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -159,16 +170,13 @@ def _summary_cell(label: str, value: str, width: str) -> str:
 
 
 def _candidate_rows(result: MarketResult) -> str:
+    """Top rows in the full layout (dead hidden spans removed), then the heading
+    row announcing the lean list that follows (see _tail_table)."""
     rows: list[str] = []
     total = len(result.candidates)
     for position, (_, row) in enumerate(result.candidates.iterrows()):
-        if position == 10 and total > 10:
-            rows.append(
-                f'<tr><td colspan="6" style="padding:9px 10px;background:#f8fafc;border-top:2px solid #e2e8f0;'
-                f'font-size:12px;font-weight:bold;color:#475569;">외 {total - 10}개 종목 (전체 목록)</td></tr>'
-            )
-        compact = position >= 10
-        padding = "7px 8px" if compact else "10px 8px"
+        if position >= TOP_ROWS:
+            break
         code = escape(str(row[result.code_column]))
         company = escape(str(row["company_name"]))
         previous = _html_price(float(row["previous_close"]), result.currency)
@@ -177,22 +185,55 @@ def _candidate_rows(result: MarketResult) -> str:
         note = row.get("note")
         note_html = (f'<div style="margin-top:3px;font-size:10px;line-height:14px;color:#9a3412;">&#9888; {escape(note)}</div>'
                      if isinstance(note, str) and note else "")
+        padding = "10px 8px"
         rows.append(
             f"""<tr class="candidate-row">
               <td class="c-code" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:bold;color:#0f172a;white-space:nowrap;">{code}</td>
-              <td class="c-company" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;line-height:17px;color:#334155;word-break:break-word;overflow-wrap:anywhere;">{company}<span class="mobile-prev" style="display:none;">Prev {previous}</span>{note_html}</td>
-              <td class="c-prev" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#475569;white-space:nowrap;"><span class="mobile-label" style="display:none;">Prev</span>{previous}</td>
-              <td class="c-close" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#0f172a;white-space:nowrap;"><span class="mobile-label" style="display:none;">Close</span>{close}</td>
-              <td class="c-change" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:bold;color:#b91c1c;white-space:nowrap;"><span class="mobile-label" style="display:none;">Change</span>&#9660;&nbsp;{change:.2f}%</td>
+              <td class="c-company" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;line-height:17px;color:#334155;word-break:break-word;overflow-wrap:anywhere;">{company}{note_html}</td>
+              <td class="c-prev" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#475569;white-space:nowrap;">{previous}</td>
+              <td class="c-close" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;color:#0f172a;white-space:nowrap;">{close}</td>
+              <td class="c-change" align="right" style="padding:{padding};border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:bold;color:#b91c1c;white-space:nowrap;">&#9660;&nbsp;{change:.2f}%</td>
               <td class="c-source" style="padding:{padding};font-size:10px;border-bottom:1px solid #e5e7eb;word-break:break-word;" title="{escape(_source_text(row, result))}">{escape(_source_tag(row, result))}</td>
             </tr>"""
+        )
+    if total > TOP_ROWS:
+        rows.append(
+            f'<tr><td colspan="6" style="padding:9px 10px;background:#f8fafc;border-top:2px solid #e2e8f0;'
+            f'font-size:12px;font-weight:bold;color:#475569;">외 {total - TOP_ROWS}개 종목 (전체 목록)</td></tr>'
         )
     return "".join(rows)
 
 
-def _issue_rows(issues: list[Issue], border: str, color: str) -> str:
+def _tail_table(result: MarketResult, limit: int) -> str:
+    """Lean list for rows beyond the top ones: ~0.3 KB per row instead of ~1.4 KB."""
+    tail = result.candidates.iloc[TOP_ROWS:]
+    if tail.empty:
+        return ""
+    shown = tail.iloc[:max(limit, 0)]
+    rows = []
+    for _, row in shown.iterrows():
+        try:
+            rows.append(
+                f'<tr style="border-bottom:1px solid #eef2f7"><td><b>{escape(str(row[result.code_column]))}</b> '
+                f'{escape(str(row["company_name"]))}</td>'
+                f'<td align="right" nowrap>{_html_price(float(row["previous_close"]), result.currency)} &#8594; '
+                f'{_html_price(float(row["close"]), result.currency)}</td>'
+                f'<td align="right" nowrap><b style="color:#b91c1c">&#9660;&nbsp;{float(row["change_pct"]):.2f}%</b></td></tr>')
+        except (KeyError, TypeError, ValueError):
+            continue
+    hidden = len(tail) - len(shown)
+    if hidden > 0:
+        rows.append(f'<tr><td colspan="3" style="color:#64748b">… 외 {hidden}개는 메일 크기 제한으로 생략 — '
+                    "전체 목록은 텍스트 본문 또는 실행 결과(JSON) 참조</td></tr>")
+    if not rows:
+        return ""
+    return ('<table role="presentation" width="100%" cellspacing="0" cellpadding="5" border="0" '
+            'style="width:100%;border-collapse:collapse;font-size:11px;color:#334155">' + "".join(rows) + "</table>")
+
+
+def _issue_rows(issues: list[Issue], border: str, color: str, limit: int = MAX_WARNING_ITEMS) -> str:
     items: list[str] = []
-    for issue in issues[:MAX_WARNING_ITEMS]:
+    for issue in issues[:limit]:
         head = (f'<div style="font-size:13px;font-weight:bold;color:{color};">{escape(issue.symbol)} '
                 f'<span style="font-weight:normal;">{escape(issue.name)}</span></div>' if issue.symbol else "")
         items.append(
@@ -203,15 +244,15 @@ def _issue_rows(issues: list[Issue], border: str, color: str) -> str:
               </td>
             </tr>"""
         )
-    if len(issues) > MAX_WARNING_ITEMS:
+    if len(issues) > limit:
         items.append(
             f'<tr><td style="padding:10px 0;border-top:1px solid {border};font-size:12px;color:{color};">'
-            f"외 {len(issues) - MAX_WARNING_ITEMS}건 — 전체 목록은 실행 artifact(JSON)와 텍스트 본문 참조</td></tr>"
+            f"외 {len(issues) - limit}건 — 전체 목록은 실행 artifact(JSON)와 텍스트 본문 참조</td></tr>"
         )
     return "".join(items)
 
 
-def _market_card(result: MarketResult) -> str:
+def _market_card(result: MarketResult, tail_limit: int = TAIL_ROWS) -> str:
     flag = "&#127482;&#127480;" if result.market == "US" else "&#127472;&#127479;"
     accent = "#1d4ed8" if result.market == "KR" else "#0f172a"
     badge_text, badge_color, badge_bg = _status_style(result.status)
@@ -237,7 +278,7 @@ def _market_card(result: MarketResult) -> str:
               <th class="h-source" width="16%" style="font-size:10px;color:#64748b;">Source</th>
             </tr>
             {_candidate_rows(result)}
-          </table>
+          </table>{_tail_table(result, tail_limit)}
         </div>"""
     message = _status_message(result)
     if message and result.status in (WARNING, ERROR):
@@ -274,6 +315,18 @@ def _market_card(result: MarketResult) -> str:
 
 
 def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datetime) -> str:
+    """HTML mail body, kept under Gmail's clipping limit by trimming the long
+    tails first (the plain-text part and the JSON artifact always hold everything)."""
+    html = ""
+    for tail_limit, issue_limit in SIZE_STEPS:
+        html = _render_html(us, kr, executed_at_kst, tail_limit, issue_limit)
+        if len(html.encode("utf-8")) <= MAX_HTML_BYTES:
+            break
+    return html
+
+
+def _render_html(us: MarketResult, kr: MarketResult, executed_at_kst: datetime, tail_limit: int,
+                 issue_limit: int) -> str:
     active = [result for result in (us, kr) if result.status != SKIPPED]
     # DATA WARNING counts only WARNING/ERROR issues; INFO goes to a separate box.
     warning_count = sum(len(result.data_warning_issues) for result in active)
@@ -282,7 +335,8 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
     if warning_count:
         rows = "".join(
             '<tr><td style="padding:8px 0;font-weight:bold;color:#92400e;">' + escape(result.title) + " — "
-            + escape(result.status) + "</td></tr>" + _issue_rows(result.data_warning_issues, "#fed7aa", "#9a3412")
+            + escape(result.status) + "</td></tr>"
+            + _issue_rows(result.data_warning_issues, "#fed7aa", "#9a3412", issue_limit)
             for result in active if result.data_warning_issues)
         warnings = f"""
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:0 0 18px;border:1px solid #f59e0b;border-collapse:separate;border-spacing:0;background:#fffbeb;">
@@ -292,14 +346,14 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
     if info_count:
         rows = "".join(
             '<tr><td style="padding:8px 0;font-weight:bold;color:#1e3a8a;">' + escape(result.title) + "</td></tr>"
-            + _issue_rows(result.info_issues, "#bfdbfe", "#1e40af")
+            + _issue_rows(result.info_issues, "#bfdbfe", "#1e40af", issue_limit)
             for result in active if result.info_issues)
         infos = f"""
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin:0 0 18px;border:1px solid #93c5fd;border-collapse:separate;border-spacing:0;background:#eff6ff;">
         <tr><td style="padding:15px 18px 8px;font-size:14px;font-weight:bold;color:#1e3a8a;">&#8505; 참고 (정상 처리) · {info_count}건</td></tr>
         <tr><td style="padding:0 18px 8px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">{rows}</table></td></tr>
       </table>"""
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 @media only screen and (max-width:600px) {{
@@ -334,7 +388,7 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
         <td class="header-meta-right" align="right" valign="bottom" style="padding-top:12px;font-size:11px;color:#94a3b8;">자동 발송 리포트</td>
       </tr></table>
     </td></tr>
-    <tr><td style="padding:20px 0 0;">{warnings}{infos}{_market_card(us)}{_market_card(kr)}</td></tr>
+    <tr><td style="padding:20px 0 0;">{warnings}{infos}{_market_card(us, tail_limit)}{_market_card(kr, tail_limit)}</td></tr>
     <tr><td style="padding:18px 20px;background:#ffffff;border:1px solid #e2e8f0;font-size:11px;line-height:19px;color:#64748b;">
       <strong style="color:#334155;">참고사항</strong><br>
       &#8226; 시장별 표시된 분석일/이전 거래일(각 거래소 실제 거래일)을 기준으로 생성됩니다.<br>
@@ -345,6 +399,8 @@ def build_html_report(us: MarketResult, kr: MarketResult, executed_at_kst: datet
     <tr><td align="center" style="padding:18px 0 8px;font-size:10px;letter-spacing:.4px;color:#94a3b8;">Automated Market Drop Monitor</td></tr>
   </table>
 </td></tr></table></body></html>"""
+    # Whitespace between tags only comes from template indentation.
+    return re.sub(r">\s+<", "><", html)
 
 
 def build_combined_subject(us: MarketResult, kr: MarketResult, test_prefix: str = "") -> str:
@@ -373,6 +429,40 @@ def build_combined_subject(us: MarketResult, kr: MarketResult, test_prefix: str 
 
         subject += f" | 데이터 누락 US {summary(us)} / KR {summary(kr)}"
     return subject
+
+
+def build_fallback_report(us: MarketResult, kr: MarketResult, executed_at_kst: datetime, error: BaseException,
+                         test_prefix: str = "") -> tuple[str, str, str]:
+    """Minimal (plain text, html, subject) used only when the normal report cannot
+    be built: the detected drops must still reach the reader. Touches as little
+    of the result objects as possible, each access guarded."""
+    lines = ["# US + KOSPI 급락 모니터 (간이 리포트)", "",
+             f"실행 시각(KST): {executed_at_kst:%Y-%m-%d %H:%M}",
+             f"※ 정식 리포트 생성 중 오류가 발생해 간이 형식으로 발송합니다: {type(error).__name__}: {error}", ""]
+    counts = []
+    for result in (us, kr):
+        try:
+            count = len(result.candidates)
+        except Exception:  # noqa: BLE001
+            count = -1
+        counts.append(count)
+        try:
+            lines.append(f"## {result.title} — 상태 {result.status}")
+            lines.append(f"분석일 {result.session_date} / 이전 거래일 {result.previous_session_date} / "
+                         f"Listing {result.total_count} / Valid {result.analyzed_count} / 탐지 {count}")
+            for issue in result.issues[:20]:
+                lines.append(f"- [{issue.level}] {issue.symbol} {issue.message}")
+            for _, row in result.candidates.iterrows():
+                lines.append(f"- {row[result.code_column]} {row['company_name']}: {row['previous_close']} → "
+                             f"{row['close']} ({float(row['change_pct']):+.2f}%)")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"(표시 실패: {type(exc).__name__})")
+        lines.append("")
+    text = "\n".join(lines)
+    shown = ["확인필요" if count < 0 else f"{count}개" for count in counts]
+    subject = f"{test_prefix.strip()}[급락 모니터][DATA WARNING] S&P500 {shown[0]} · KOSPI {shown[1]} | 간이 리포트"
+    html = "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\"></head><body><pre style=\"font-size:13px;line-height:1.5;white-space:pre-wrap\">" + escape(text) + "</pre></body></html>"
+    return text + "\n", html, subject
 
 
 def render_markdown(

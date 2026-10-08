@@ -99,7 +99,7 @@ def test_nasdaq_throttling_trips_breaker_after_consecutive_failures(monkeypatch)
     monkeypatch.setattr(market_data.nasdaq, "fetch", nasdaq_fetch)
     result = download_market_data(constituents(*tickers), DAY, PREV, Settings(max_workers=1, missing_retry_pause_seconds=0,
                                                                                 nasdaq_min_interval_seconds=0))
-    assert len(calls) == 10 + market_data.NASDAQ_CIRCUIT_BREAKER
+    assert len(calls) == 10 + Settings().provider_failure_threshold
     # The largest decliners were checked first.
     verified = set(result.prices.loc[result.prices.cross_checked, "ticker"])
     assert verified == {f"T{i:03d}" for i in range(90, 100)}

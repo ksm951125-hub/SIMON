@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -31,6 +32,36 @@ def infer_cause(items: list[dict[str, Any]]) -> str:
     return "명확한 급락 원인 확인되지 않음"
 
 
+NO_NEWS = {"cause": "명확한 급락 원인 확인되지 않음", "items": [], "error": None}
+
+
+def fetch_news_many(targets: list[tuple[str, str]], session_date: date | None = None,
+                    settings: Settings = SETTINGS, budget_seconds: float | None = None,
+                    fetch=None, workers: int = 6) -> list[dict[str, Any]]:
+    """News lookup for several symbols in parallel with a hard total time budget.
+
+    News is enrichment only: whatever is not finished within the budget gets the
+    neutral default, so a slow provider can never delay or fail the report."""
+    fetch = fetch or fetch_news
+    budget = settings.news_budget_seconds if budget_seconds is None else budget_seconds
+    results = [{**NO_NEWS, "error": "시간 초과로 뉴스 조회 생략"} for _ in targets]
+    if not targets:
+        return results
+    executor = ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets))))
+    futures = {executor.submit(fetch, ticker, name, session_date, settings): index
+               for index, (ticker, name) in enumerate(targets)}
+    done, pending = wait(futures, timeout=budget)
+    for future in done:
+        try:
+            results[futures[future]] = future.result()
+        except Exception as exc:  # noqa: BLE001 - news must never raise
+            results[futures[future]] = {**NO_NEWS, "error": f"{type(exc).__name__}: {exc}"}
+    if pending:
+        LOGGER.warning("뉴스 조회 %d/%d건이 %.0f초 예산 안에 끝나지 않아 생략", len(pending), len(targets), budget)
+    executor.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
 def fetch_news(
     ticker: str,
     company_name: str,
@@ -42,7 +73,7 @@ def fetch_news(
             "https://query1.finance.yahoo.com/v1/finance/search",
             params={"q": f"{ticker} {company_name}", "quotesCount": 0, "newsCount": 5},
             headers={"User-Agent": settings.user_agent},
-            timeout=settings.download_timeout_seconds,
+            timeout=(3, 6),
         )
         response.raise_for_status()
         items = []

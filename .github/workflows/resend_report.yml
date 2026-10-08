@@ -22,15 +22,15 @@ permissions:
 
 jobs:
   resend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Download original report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: us-kospi-drop-report-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}

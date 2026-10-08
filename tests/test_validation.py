@@ -107,3 +107,23 @@ def test_supporting_value_resolves_one_against_one_disagreement():
     result = run(o("Yahoo", 6330, 6280), o("Daum", 6330, 6270), naver, tolerance=0.5)
     assert result.validation_status in (CROSS_VALIDATED, FALLBACK_VALIDATED) and not result.mismatch
     assert result.close == 6280 and result.outliers
+
+
+def test_supporting_value_breaks_a_tie_against_the_primary():
+    """094800 on 2026-10-02: Yahoo alone said 11,531 while the next-day KRX base and
+    the integrated last trade both said 7,870. The independent evidence wins."""
+    naver_next = obs("T", "Naver 익일 기준가", None, 7870, prev_date=PREV, day=DAY)
+    integrated = obs("T", "Naver", None, 7870, prev_date=PREV, day=DAY, close_type="INTEGRATED")
+    integrated.close = replace(integrated.close, corroborative=True)
+    prev_a = obs("T", "Daum days", 7880, None, prev_date=PREV, day=DAY)
+    prev_b = obs("T", "Naver", 7880, None, prev_date=PREV, day=DAY)
+    result = run(o("Yahoo", 7880, 11531), naver_next, integrated, prev_a, prev_b, tolerance=0.5)
+    assert result.close == 7870 and result.validation_status == FALLBACK_VALIDATED and not result.mismatch
+    assert result.outliers and "Yahoo 11,531" in result.outliers[0] and not result.detected
+
+
+def test_supporting_value_never_overrides_two_regular_sources():
+    integrated = obs("T", "Naver", None, 90, prev_date=PREV, day=DAY, close_type="INTEGRATED")
+    integrated.close = replace(integrated.close, corroborative=True)
+    result = run(o("Yahoo", 100, 95), o("Nasdaq", 100, 95), integrated)
+    assert result.close == 95 and result.validation_status == CROSS_VALIDATED

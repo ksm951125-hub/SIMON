@@ -21,7 +21,7 @@ from datetime import date, datetime
 from config import SETTINGS, Settings
 from net import get_with_retry
 from providers.base import (INTEGRATED, INVALID_PRICE, NOT_PROVIDED, OK, STALE_SOURCE, FieldValue, PriceObservation,
-                            failed, positive)
+                            failed, never_raises, positive)
 from special_trading import MarketState
 
 SOURCE = "Daum"
@@ -44,8 +44,18 @@ def _parse_date(text) -> date | None:
     return None
 
 
+def _limit(value) -> float | None:
+    """Limit prices: a finite number >= 0 (0 means "no limit applies"), else unknown."""
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) and number >= 0 else None
+
+
 def parse_state(payload: dict) -> MarketState:
-    state = payload.get("stockState") or {}
+    state = payload.get("stockState")
+    state = state if isinstance(state, dict) else {}
     return MarketState(
         source=SOURCE,
         as_of=_parse_date(payload.get("tradeDate") or payload.get("date")),
@@ -57,16 +67,17 @@ def parse_state(payload: dict) -> MarketState:
         revaluation=str(state.get("revaluation") or "NONE"),
         ex_event=str(state.get("ex") or "NONE"),
         listing_date=_parse_date(payload.get("listingDate")),
-        upper_limit=payload.get("upperLimitPrice"),
-        lower_limit=payload.get("lowerLimitPrice"),
-        nxt_tradable=payload.get("afterMarketAvailable"),
+        upper_limit=_limit(payload.get("upperLimitPrice")),
+        lower_limit=_limit(payload.get("lowerLimitPrice")),
+        nxt_tradable=payload.get("afterMarketAvailable") if isinstance(payload.get("afterMarketAvailable"), bool) else None,
     )
 
 
 def observation_from_quote(code: str, payload: dict, previous_date: date, session_date: date,
                            next_session: date | None) -> PriceObservation:
     quote_date = _parse_date(payload.get("tradeDate") or payload.get("date"))
-    state = payload.get("stockState") or {}
+    state = payload.get("stockState")
+    state = state if isinstance(state, dict) else {}
     if quote_date == session_date:
         regular = positive(payload.get("regularTradePrice"))
         if regular is None and payload.get("afterMarketAvailable") is False:
@@ -91,6 +102,7 @@ def observation_from_quote(code: str, payload: dict, previous_date: date, sessio
     return failed(code, SOURCE, detail, STALE_SOURCE)
 
 
+@never_raises(SOURCE, extras=1)
 def fetch_quote(code: str, previous_date: date, session_date: date, next_session: date | None,
                 settings: Settings = SETTINGS) -> tuple[PriceObservation, MarketState | None]:
     try:
@@ -124,6 +136,7 @@ def observation_from_days(code: str, payload: dict, previous_date: date, session
         adjustment="split", volume=row.get("accTradeVolume"))
 
 
+@never_raises(f"{SOURCE} days")
 def fetch_days(code: str, previous_date: date, session_date: date, settings: Settings = SETTINGS) -> PriceObservation:
     try:
         payload = get_with_retry(DAYS_URL.format(code=code),

@@ -47,8 +47,10 @@ CATEGORY_TEXT = {
     "LISTING": "종목 목록 불일치",
     "CALENDAR": "거래일 안내",
     "SOURCE": "데이터 소스 장애",
+    "COVERAGE": "시장 전체 데이터 확보 실패",
     "NOTICE": "참고",
     "LISTING_ENDED": "거래 종료 종목 제외(인수·상장폐지 추정)",
+    "NEW_LISTING": "신규 상장 종목 제외(첫 거래일)",
     "TICKER_CHANGE": "티커 변경 추정(새 티커로 분석)",
     "LISTING_CHANGE": "티커 변경·상장폐지 추정(확인 필요)",
 }
@@ -92,6 +94,8 @@ class MarketResult:
     issues: list[Issue] = field(default_factory=list)
     # Neutral source facts (e.g. "Nasdaq 분석일 종가 미게시 → CNBC로 검증"); never affect status.
     source_notes: list[str] = field(default_factory=list)
+    # Per-provider call statistics (ok/failed/skipped, tripped breakers): logs + JSON only.
+    source_health: list[str] = field(default_factory=list)
 
     @property
     def coverage(self) -> float:
@@ -156,6 +160,17 @@ def classify_status(total_count: int, analyzed_count: int, issues: list[Issue] |
         return ERROR
     levels = [issue.level for issue in issues or []]
     return max(levels, key=LEVEL_ORDER.__getitem__, default=NORMAL)
+
+
+def explain_error(result: MarketResult) -> None:
+    """An ERROR market always carries an ERROR-level reason (coverage numbers and
+    the usual causes), so the mail never shows an ERROR badge without a cause."""
+    if result.status != ERROR or any(issue.level == ERROR for issue in result.issues):
+        return
+    result.issues.insert(0, Issue(
+        ERROR, "COVERAGE",
+        f"Valid Prices {result.analyzed_count:,}/{result.total_count:,} (Coverage {result.coverage:.1%}, "
+        f"기준 {SETTINGS.failed_coverage_ratio:.0%} 이상 필요). 휴장·데이터 소스 장애·미게시 가능성: 소스 상태는 로그 참조"))
 
 
 def issues_from_prices(prices: pd.DataFrame, code_column: str, validation_band_pct: float,

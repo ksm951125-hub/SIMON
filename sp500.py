@@ -4,10 +4,10 @@ import logging
 from pathlib import Path
 
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
 
 from config import SETTINGS, Settings
+from net import get_with_retry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,12 +17,9 @@ def to_yahoo_ticker(ticker: str) -> str:
 
 
 def _download_constituents(settings: Settings) -> pd.DataFrame:
-    response = requests.get(
-        settings.constituents_url,
-        headers={"User-Agent": settings.user_agent},
-        timeout=settings.download_timeout_seconds,
-    )
-    response.raise_for_status()
+    # Transient errors (timeouts, 429/5xx) must not push the day onto the stale cached list.
+    response = get_with_retry(settings.constituents_url, headers={"User-Agent": settings.user_agent},
+                              settings=settings)
     soup = BeautifulSoup(response.text, "html.parser")
     table = soup.select_one("table.wikitable")
     if table is None:

@@ -16,9 +16,13 @@ valid previous close while its analysis-day close is not published yet
 """
 from __future__ import annotations
 
+import functools
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+
+LOGGER = logging.getLogger(__name__)
 
 # Field statuses
 OK = "OK"
@@ -45,8 +49,14 @@ class FieldValue:
     corroborative: bool = False
 
     @property
+    def sane(self) -> bool:
+        """A finite, positive number (adapters guarantee it; checked again here)."""
+        return (self.status == OK and isinstance(self.value, (int, float)) and math.isfinite(self.value)
+                and self.value > 0)
+
+    @property
     def usable(self) -> bool:
-        return self.status == OK and self.value is not None and self.session_type == REGULAR
+        return self.sane and self.session_type == REGULAR
 
 
 @dataclass
@@ -63,6 +73,12 @@ class PriceObservation:
     # whether the source says the symbol does not exist (renamed/delisted).
     latest_date: date | None = None
     symbol_unknown: bool = False
+    # Corporate action inside (previous session, analysis session]: raw pre-event
+    # prices equal split-adjusted prices x split_factor (2:1 split -> 2.0).
+    split_factor: float = 1.0
+    # First regular trading day the source knows for the symbol (new listing,
+    # spin-off): there is no previous close on or before that day.
+    first_trade_date: date | None = None
 
     @property
     def has_any(self) -> bool:
@@ -90,6 +106,30 @@ def failed(symbol: str, source: str, detail: str, status: str = UNAVAILABLE, *,
     return PriceObservation(symbol, source,
                             close=FieldValue(status=status, detail=detail),
                             previous_close=FieldValue(status=status, detail=detail), symbol_unknown=symbol_unknown)
+
+
+def internal_error(symbol: str, source: str, exc: BaseException) -> PriceObservation:
+    """An adapter hit an unexpected payload/bug: report it as a failed observation
+    for that one symbol. One odd response must never take down a whole market."""
+    LOGGER.warning("%s %s 처리 오류(해당 종목만 제외): %s: %s", source, symbol, type(exc).__name__, exc)
+    return failed(symbol, source, f"{source} 처리 오류: {type(exc).__name__}: {exc}", INVALID_PRICE)
+
+
+def never_raises(source: str, extras: int = 0):
+    """Decorator for adapter entry points whose first argument is the symbol.
+
+    ``extras`` is the number of additional values (None) in a tuple return, e.g.
+    ``(observation, market_state)`` -> extras=1."""
+    def decorate(function):
+        @functools.wraps(function)
+        def wrapper(symbol, *args, **kwargs):
+            try:
+                return function(symbol, *args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - this is the isolation boundary
+                observation = internal_error(symbol, source, exc)
+                return (observation, *([None] * extras)) if extras else observation
+        return wrapper
+    return decorate
 
 
 def from_series(symbol: str, source: str, series: dict[date, float | None], previous_date: date, session_date: date,

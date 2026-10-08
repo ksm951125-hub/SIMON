@@ -38,8 +38,17 @@ class Settings:
 
     # Status policy (see market_result.classify_status).
     failed_coverage_ratio: float = 0.90
-    # Hard per-market wall-clock limit (runtime.execute_market).
-    market_deadline_seconds: int = 480
+    # Hard per-market wall-clock limit (runtime.execute_market). Phase budgets
+    # below keep a normal run far under it; the job limit in the workflow is 20 min.
+    market_deadline_seconds: int = 600
+    # Per-phase allowances: once spent, remaining symbols skip that provider and
+    # are resolved by the other sources instead of the whole market timing out.
+    primary_budget_seconds: float = 200.0
+    secondary_budget_seconds: float = 200.0
+    # Consecutive failures after which a provider is considered down for the run.
+    provider_failure_threshold: int = 25
+    # Bounded wait for non-essential enrichment (news).
+    news_budget_seconds: float = 30.0
 
     # Legacy name kept for callers/tests that still read it.
     download_timeout_seconds: int = 15

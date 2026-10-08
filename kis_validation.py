@@ -11,6 +11,12 @@ from krx import number
 BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 
+class KisMismatch(ValueError):
+    """KIS answered, and its close differs from ours: a real disagreement.
+    Every other failure (transport, schema, credentials) is a RuntimeError =
+    "KIS unavailable", which must never be mistaken for a price problem."""
+
+
 class KisValidator:
     def __init__(self):
         self.key, self.secret = os.getenv("KIS_APP_KEY", ""), os.getenv("KIS_APP_SECRET", "")
@@ -51,17 +57,20 @@ class KisValidator:
         except (requests.RequestException, ValueError):
             raise RuntimeError("KIS daily validation request failed") from None
         if not isinstance(payload, dict) or payload.get("rt_cd") != "0" or not isinstance(payload.get("output2"), list):
-            raise ValueError("KIS daily response error/schema mismatch")
+            raise RuntimeError("KIS daily response error/schema mismatch")
         values = {}
-        for row in payload["output2"]:
-            day = row.get("stck_bsop_date")
-            if day in values:
-                raise ValueError("KIS duplicate session")
-            values[day] = number(row.get("stck_clpr"), "KIS raw close", positive=True)
+        try:
+            for row in payload["output2"]:
+                day = row.get("stck_bsop_date")
+                if day in values:
+                    raise RuntimeError("KIS duplicate session")
+                values[day] = number(row.get("stck_clpr"), "KIS raw close", positive=True)
+        except (ValueError, AttributeError) as exc:
+            raise RuntimeError(f"KIS daily rows unreadable: {exc}") from None
         for day, expected in [(previous, previous_close), (current, close)]:
             actual = values.get(day.strftime("%Y%m%d"))
             if actual is None or actual != number(expected, "KRX close", positive=True):
-                raise ValueError(f"{code} {day}: KRX close={expected}, KIS(J) close={actual}; excluded")
+                raise KisMismatch(f"{code} {day}: KRX close={expected}, KIS(J) close={actual}; excluded")
 
 
 def optional_validator():

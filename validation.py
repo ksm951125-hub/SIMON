@@ -54,39 +54,49 @@ class FieldConsensus:
 
 
 def field_consensus(values: list[tuple[str, float]], primary: str, tolerance: float,
-                    unavailable: list[str] | None = None, authoritative: str | None = None) -> FieldConsensus:
+                    unavailable: list[str] | None = None, authoritative: str | None = None,
+                    supporting: list[tuple[str, float]] | None = None) -> FieldConsensus:
     """values: (source, value) pairs from usable observations.
 
-    The largest group of agreeing sources wins (ties prefer the primary). A value
-    backed by >= 2 sources is VERIFIED even if a lone source disagrees (that
-    source is recorded as an outlier in ``alternatives``). Without any agreeing
-    pair the primary's value is kept and the field is a MISMATCH.
+    ``supporting`` holds corroborative-only values (e.g. a KRX+NXT integrated last
+    trade): they never form a group of their own, but each one agreeing with a
+    group adds half a vote to it, so independent evidence can break a 1-vs-1 tie
+    against the primary. Values disagreeing with the winner are simply ignored.
+
+    The group with the most votes wins (ties prefer the primary). A value backed
+    by >= 2 votes' worth of sources is VERIFIED even if a lone source disagrees
+    (that source is recorded as an outlier in ``alternatives``). Without any
+    agreeing pair the primary's value is kept and the field is a MISMATCH.
     """
     unavailable = unavailable or []
+    supporting = supporting or []
     if not values:
         return FieldConsensus(None, MISSING, unavailable=unavailable)
 
-    def agreeing(value: float) -> list[tuple[str, float]]:
-        return [(source, other) for source, other in values if abs(other - value) <= tolerance]
+    def agreeing(value: float, pool: list[tuple[str, float]]) -> list[tuple[str, float]]:
+        return [(source, other) for source, other in pool if abs(other - value) <= tolerance]
 
     primary_value = next((value for source, value in values if source == primary), None)
 
-    def rank(members: list[tuple[str, float]]):
-        return (len(members), any(source == primary for source, _ in members))
+    def rank(value: float):
+        members = agreeing(value, values)
+        return (len(members) + 0.5 * len(agreeing(value, supporting)), any(source == primary for source, _ in members))
 
     official = next((value for source, value in values if source == authoritative), None)
-    members = max((agreeing(value) for _, value in values), key=rank)
+    anchor = max((value for _, value in values), key=rank)
     if official is not None:
-        members = agreeing(official)  # the exchange's own close wins over any majority
-    elif len(members) < 2 and primary_value is not None:
-        members = agreeing(primary_value)
+        anchor = official  # the exchange's own close wins over any majority
+    elif (len(agreeing(anchor, values)) + len(agreeing(anchor, supporting)) < 2 and primary_value is not None):
+        anchor = primary_value
+    members = agreeing(anchor, values)
+    support = agreeing(anchor, supporting)
     chosen = official if official is not None else next((value for source, value in members if source == primary),
                                                           members[0][1])
     member_names = {source for source, _ in members}
     alternatives = [(source, value) for source, value in values if source not in member_names]
     names = sorted((("*" + source) if source == primary else source for source, _ in members),
-                   key=lambda name: not name.startswith("*"))
-    if len(members) >= 2:
+                   key=lambda name: not name.startswith("*")) + [source for source, _ in support]
+    if len(members) + len(support) >= 2:
         status = VERIFIED
     else:
         status = MISMATCH if alternatives else SINGLE
@@ -100,7 +110,7 @@ def _field_inputs(observations: list[PriceObservation], attribute: str, exclude:
         field_value = getattr(observation, attribute)
         if observation.source in exclude:
             continue
-        if field_value.status == OK and field_value.value is not None and field_value.corroborative:
+        if field_value.sane and field_value.corroborative:
             # Supporting-only (e.g. KRX+NXT integrated last trade): confirms when equal.
             supporting.append((observation.source, field_value.value))
         elif field_value.usable:
@@ -112,19 +122,6 @@ def _field_inputs(observations: list[PriceObservation], attribute: str, exclude:
             unavailable.append(f"{observation.source} {label}({field_value.detail})"
                                if field_value.detail else f"{observation.source} {label}")
     return values, supporting, unavailable
-
-
-def _with_support(result: FieldConsensus, supporting: list[tuple[str, float]], tolerance: float) -> FieldConsensus:
-    """Add corroborative-only values that agree; disagreeing ones are ignored."""
-    if result.value is None or not supporting:
-        return result
-    agreeing = [source for source, value in supporting if abs(value - result.value) <= tolerance]
-    result.sources.extend(agreeing)
-    if agreeing and result.status in (SINGLE, MISMATCH):
-        # An independent supporting value siding with the chosen value turns a
-        # one-against-one disagreement into a majority; the other becomes an outlier.
-        result.status = VERIFIED
-    return result
 
 
 @dataclass
@@ -159,8 +156,7 @@ def assess(symbol: str, observations: list[PriceObservation], *, primary: str, t
         results = []
         for attribute in ("previous_close", "close"):
             values, supporting, unavailable = _field_inputs(observations, attribute, exclude)
-            results.append(_with_support(field_consensus(values, primary, tolerance, unavailable, authoritative),
-                                         supporting, tolerance))
+            results.append(field_consensus(values, primary, tolerance, unavailable, authoritative, supporting))
         return results[0], results[1]
 
     previous, close = consensus()

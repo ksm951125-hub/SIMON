@@ -19,7 +19,8 @@ import pandas_market_calendars as mcal
 
 from config import SETTINGS, Settings
 from net import get_with_retry
-from providers.base import INVALID_PRICE, FieldValue, PriceObservation, failed, from_series, positive
+from providers.base import (INVALID_PRICE, FieldValue, PriceObservation, failed, from_series, never_raises,
+                            positive)
 
 LOGGER = logging.getLogger(__name__)
 SOURCE = "Yahoo"
@@ -77,6 +78,18 @@ def last_trade_date(payload: dict, zone: ZoneInfo) -> date | None:
     return datetime.fromtimestamp(timestamp, timezone.utc).astimezone(zone).date() if timestamp else None
 
 
+def first_trade_date(payload: dict, zone: ZoneInfo) -> date | None:
+    """Date of the symbol's first regular trade (meta.firstTradeDate), if Yahoo states it."""
+    try:
+        timestamp = payload["chart"]["result"][0]["meta"].get("firstTradeDate")
+        if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+            return None
+        # timedelta (not fromtimestamp): old listings carry negative epochs.
+        return (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=timestamp)).astimezone(zone).date()
+    except (KeyError, IndexError, TypeError, AttributeError, OverflowError, ValueError):
+        return None
+
+
 def parse_us_chart(payload: dict, ticker: str) -> dict[date, Bar]:
     """Regular-session daily bars keyed by the exchange session date.
 
@@ -132,13 +145,49 @@ def parse_kr_chart(payload: dict, code: str) -> dict[date, Bar]:
     return bars
 
 
+def split_events(payload: dict, previous_session_date: date, session_date: date, zone: ZoneInfo
+                 ) -> list[tuple[date, float, str]]:
+    """Split/merge events effective in (previous session, analysis session]:
+    (effective date, numerator/denominator, ratio text). Malformed events are skipped."""
+    found: list[tuple[date, float, str]] = []
+    try:
+        events = ((payload["chart"]["result"][0].get("events") or {}).get("splits") or {}).values()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return found
+    for event in events:
+        try:
+            day = datetime.fromtimestamp(event["date"], timezone.utc).astimezone(zone).date()
+        except (KeyError, TypeError, ValueError, AttributeError, OSError, OverflowError):
+            continue
+        if not previous_session_date < day <= session_date:
+            continue
+        ratio = None
+        try:
+            ratio = float(event["numerator"]) / float(event["denominator"])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            try:  # fall back to the "N:D" text
+                numerator, denominator = str(event.get("splitRatio", "")).split(":")
+                ratio = float(numerator) / float(denominator)
+            except (ValueError, ZeroDivisionError, AttributeError):
+                ratio = None
+        # An event with an unreadable ratio is still reported (note), but cannot rebase prices.
+        found.append((day, ratio if ratio and ratio > 0 else 1.0, str(event.get("splitRatio", ""))))
+    return found
+
+
 def split_note(payload: dict, previous_session_date: date, session_date: date, zone: ZoneInfo) -> str | None:
-    result = payload["chart"]["result"][0]
-    for event in ((result.get("events") or {}).get("splits") or {}).values():
-        split_day = datetime.fromtimestamp(event["date"], timezone.utc).astimezone(zone).date()
-        if previous_session_date < split_day <= session_date:
-            return f"주식분할/병합 {event.get('splitRatio', '')} ({split_day}): 분할 조정 종가 기준"
-    return None
+    events = split_events(payload, previous_session_date, session_date, zone)
+    if not events:
+        return None
+    day, _, text = events[0]
+    return f"주식분할/병합 {text} ({day}): 분할 조정 종가 기준"
+
+
+def split_factor(payload: dict, previous_session_date: date, session_date: date, zone: ZoneInfo) -> float:
+    factor = 1.0
+    for _, ratio, _ in split_events(payload, previous_session_date, session_date, zone):
+        factor *= ratio
+    return factor
 
 
 def observation_from_bars(symbol: str, bars: dict[date, Bar], previous_date: date, session_date: date,
@@ -178,6 +227,7 @@ def _fetch(symbol: str, previous_date: date, session_date: date, settings: Setti
     return None, "Yahoo 조회 실패: " + " / ".join(errors)
 
 
+@never_raises(SOURCE)
 def fetch_us(ticker: str, previous_date: date, session_date: date, settings: Settings = SETTINGS) -> PriceObservation:
     payload, error = _fetch(ticker, previous_date, session_date, settings)
     if error:
@@ -188,11 +238,14 @@ def fetch_us(ticker: str, previous_date: date, session_date: date, settings: Set
         return failed(ticker, SOURCE, f"Yahoo 응답 거부: {exc}", INVALID_PRICE)
     observation = observation_from_bars(ticker, bars, previous_date, session_date)
     observation.note = split_note(payload, previous_date, session_date, NEW_YORK)
+    observation.split_factor = split_factor(payload, previous_date, session_date, NEW_YORK)
     known = [day for day in (observation.latest_date, last_trade_date(payload, NEW_YORK)) if day]
     observation.latest_date = max(known) if known else None
+    observation.first_trade_date = first_trade_date(payload, NEW_YORK)
     return observation
 
 
+@never_raises(SOURCE)
 def fetch_kr(code: str, previous_date: date, session_date: date, settings: Settings = SETTINGS) -> PriceObservation:
     payload, error = _fetch(f"{code}.KS", previous_date, session_date, settings)
     if error:
@@ -246,12 +299,16 @@ def find_successor_symbols(ticker: str, company_name: str, exclude: set[str],
         except Exception as exc:
             LOGGER.warning("Yahoo 검색 실패(%s): %s", query, exc)
             continue
-        for quote in payload.get("quotes") or []:
-            symbol = str(quote.get("symbol") or "").upper()
-            if (quote.get("quoteType") != "EQUITY" or quote.get("exchange") not in US_EXCHANGES
-                    or not re.fullmatch(r"[A-Z]{1,5}", symbol) or symbol == ticker.upper()
-                    or symbol in exclude or symbol in found):
-                continue
-            if any(company_names_match(company_name, quote.get(key)) for key in ("shortname", "longname")):
-                found.append(symbol)
+        try:
+            quotes = payload.get("quotes") or []
+            for quote in quotes:
+                symbol = str(quote.get("symbol") or "").upper()
+                if (quote.get("quoteType") != "EQUITY" or quote.get("exchange") not in US_EXCHANGES
+                        or not re.fullmatch(r"[A-Z]{1,5}", symbol) or symbol == ticker.upper()
+                        or symbol in exclude or symbol in found):
+                    continue
+                if any(company_names_match(company_name, quote.get(key)) for key in ("shortname", "longname")):
+                    found.append(symbol)
+        except (AttributeError, TypeError) as exc:  # unexpected search payload: no successor found
+            LOGGER.warning("Yahoo 검색 응답 형식 오류(%s): %s", query, exc)
     return found[:3]

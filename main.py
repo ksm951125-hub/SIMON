@@ -17,11 +17,11 @@ from kis_validation import optional_validator
 from kospi import download_kospi_market_data, get_kospi_session_context, load_kospi_constituents
 from market_calendar import DATA_READY_DELAY, KST, SessionContext, get_session_context
 from market_data import download_market_data
-from market_result import (ERROR, INFO, SKIPPED, WARNING, Issue, MarketResult, classify_status,
+from market_result import (ERROR, INFO, SKIPPED, WARNING, Issue, MarketResult, classify_status, explain_error,
                            issues_from_prices)
-from news import fetch_news
+from news import fetch_news, fetch_news_many
 from notifier import NotificationError, send_gmail_email
-from report import build_combined_subject, build_html_report, build_plain_text_report
+from report import build_combined_subject, build_fallback_report, build_html_report, build_plain_text_report
 from runtime import execute_market
 from sp500 import load_constituents
 
@@ -79,6 +79,8 @@ def _log_summary(result: MarketResult, candidate_count: int) -> None:
         result.cross_checked_count, candidate_count, len(result.candidates), result.coverage * 100, result.status,
         statuses,
     )
+    for line in result.source_health:
+        LOGGER.info("[%s] HEALTH %s", result.market, line)
     for issue in result.issues:
         log = LOGGER.warning if issue.is_data_warning else LOGGER.info
         log("[%s] %s %s %s %s | %s", result.market, issue.level, issue.category, issue.symbol, issue.name, issue.message)
@@ -86,16 +88,28 @@ def _log_summary(result: MarketResult, candidate_count: int) -> None:
         LOGGER.info("[%s] SOURCE %s", result.market, note)
 
 
+MAX_LISTED_MISSING = 20
+
+
 def _missing_issues(missing: dict[str, str], names: dict[str, str],
                     transitions: dict[str, str] | None = None) -> tuple[dict[str, str], list[Issue]]:
     """Missing symbols are WARNING; a symbol that vanished from every source (ticker
-    change/delisting not yet reflected in the constituent list) says so explicitly."""
+    change/delisting not yet reflected in the constituent list) says so explicitly.
+    A long list of ordinary gaps is summarized as one issue (the full list stays in
+    the text report and the JSON): hundreds of identical rows hide what matters."""
     transitions = transitions or {}
     keyed = {f"{code} {names.get(code, '')}".strip(): transitions.get(code, reason)
              for code, reason in sorted(missing.items())}
-    issues = [Issue(WARNING, "LISTING_CHANGE" if code in transitions else "MISSING",
-                    transitions.get(code, reason), code, names.get(code, ""))
-              for code, reason in sorted(missing.items())]
+    ordinary = [code for code in sorted(missing) if code not in transitions]
+    issues = [Issue(WARNING, "LISTING_CHANGE", transitions[code], code, names.get(code, ""))
+              for code in sorted(missing) if code in transitions]
+    if len(ordinary) > MAX_LISTED_MISSING:
+        examples = ", ".join(f"{code} {names.get(code, '')}".strip() for code in ordinary[:5])
+        reasons = sorted({missing[code].split(":")[0] for code in ordinary})[:3]
+        issues.append(Issue(WARNING, "MISSING", f"{len(ordinary)}종목 가격 확보 실패 (예: {examples} …). "
+                                                f"주요 사유: {' / '.join(reasons)}. 전체 목록은 텍스트 본문·JSON 참조"))
+    else:
+        issues += [Issue(WARNING, "MISSING", missing[code], code, names.get(code, "")) for code in ordinary]
     return keyed, issues
 
 
@@ -112,6 +126,8 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
     missing, issues = _missing_issues(collection.missing, names, collection.transitions)
     issues += [Issue(INFO, "LISTING_ENDED", reason, ticker, names.get(ticker, ""))
                for ticker, reason in sorted(collection.excluded.items())]
+    issues += [Issue(INFO, "NEW_LISTING", reason, ticker, names.get(ticker, ""))
+               for ticker, reason in sorted(collection.new_listings.items())]
     price_issues, price_notes = issues_from_prices(prices, "ticker", SETTINGS.us_validation_band_pct)
     issues += price_issues
     if constituents.attrs.get("warning"):
@@ -125,7 +141,9 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
     _log_rows("US", "CANDIDATE", band.sort_values("change_pct") if not band.empty else band, "ticker")
     candidates = prices.loc[prices["detected"]].copy() if not prices.empty else pd.DataFrame()
     if not candidates.empty:
-        news = [fetch_news(row["ticker"], row["company_name"], context.session_date) for _, row in candidates.iterrows()]
+        # Enrichment only (not shown in the mail body): bounded, parallel, never raises.
+        news = fetch_news_many([(row["ticker"], row["company_name"]) for _, row in candidates.iterrows()],
+                               context.session_date, SETTINGS, fetch=fetch_news)
         candidates["news_cause"] = [item["cause"] for item in news]
         candidates["news_items"] = [item["items"] for item in news]
         candidates = candidates.sort_values("change_pct").reset_index(drop=True)
@@ -136,13 +154,15 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
         session_date=context.session_date, previous_session_date=context.previous_session_date,
         # Symbols with no trade on either session (merger completed, delisted)
         # are not part of today's analyzable universe.
-        total_count=len(constituents) - len(collection.excluded), analyzed_count=len(prices),
+        total_count=len(constituents) - len(collection.excluded) - len(collection.new_listings),
+        analyzed_count=len(prices),
         candidates=candidates, missing=missing,
         fallback_count=collection.fallback_count, mismatch_count=collection.mismatch_count,
         cross_checked_count=collection.cross_checked_count, issues=issues,
-        source_notes=collection.notices + price_notes,
+        source_notes=collection.notices + price_notes, source_health=collection.health,
     )
     result.status = classify_status(result.total_count, result.analyzed_count, issues)
+    explain_error(result)
     _log_summary(result, len(band))
     return result
 
@@ -150,9 +170,21 @@ def run_us_monitor(session_date: date | None) -> MarketResult:
 def _optional_krx_client():
     if not os.getenv("KRX_API_KEY", "").strip():
         return None
-    from krx import KrxClient
+    try:
+        from krx import KrxClient
 
-    return KrxClient()
+        return KrxClient()
+    except Exception as exc:  # noqa: BLE001 - optional cross-check only
+        LOGGER.warning("[KR] KRX 공식 교차검증 사용 불가: %s", exc)
+        return None
+
+
+def _optional_validator():
+    try:
+        return optional_validator()
+    except Exception as exc:  # noqa: BLE001 - e.g. KIS_VALIDATE=1 without credentials
+        LOGGER.warning("[KR] KIS 교차검증 사용 불가(설정/인증 확인 필요): %s", exc)
+        return None
 
 
 def run_kr_monitor(session_date: date | None) -> MarketResult:
@@ -163,7 +195,7 @@ def run_kr_monitor(session_date: date | None) -> MarketResult:
                 constituents.attrs.get("expected"), constituents.attrs.get("loaded"),
                 constituents.attrs.get("unresolved"))
     collection = download_kospi_market_data(constituents, context, krx_client=_optional_krx_client(),
-                                            validator=optional_validator())
+                                            validator=_optional_validator())
     prices = collection.prices
 
     names = dict(zip(constituents["code"], constituents["company_name"]))
@@ -173,6 +205,8 @@ def run_kr_monitor(session_date: date | None) -> MarketResult:
     issues += [Issue(WARNING, "LISTING", warning) for warning in constituents.attrs.get("warnings", [])]
     if context.warning:
         issues.append(Issue(context.warning_level, "CALENDAR", context.warning))
+    if context.notice:
+        issues.append(Issue(INFO, "CALENDAR", context.notice))
 
     band = prices.loc[prices["change_pct"] <= SETTINGS.kr_validation_band_pct] if not prices.empty else prices
     _log_rows("KR", "CANDIDATE", band.sort_values("change_pct") if not band.empty else band, "code")
@@ -186,9 +220,10 @@ def run_kr_monitor(session_date: date | None) -> MarketResult:
         total_count=len(constituents), analyzed_count=len(prices), candidates=candidates, missing=missing,
         fallback_count=collection.fallback_count, mismatch_count=collection.mismatch_count,
         cross_checked_count=collection.cross_checked_count, issues=issues,
-        source_notes=collection.notices + price_notes,
+        source_notes=collection.notices + price_notes, source_health=collection.health,
     )
     result.status = classify_status(result.total_count, result.analyzed_count, issues)
+    explain_error(result)
     _log_summary(result, len(band))
     return result
 
@@ -234,6 +269,7 @@ def _write_outputs(us: MarketResult, kr: MarketResult, plain_text: str, html: st
             "cross_checked": result.cross_checked_count, "threshold": result.threshold_pct,
             "detected": len(result.candidates), "missing": result.missing,
             "issues": [issue.__dict__ for issue in result.issues], "source_notes": result.source_notes,
+            "source_health": result.source_health,
             "error": result.error, "source": result.source,
             "candidates": _records(result.candidates.drop(columns=["news_items"], errors="ignore")),
             "prices": _records(result.prices),
@@ -242,6 +278,18 @@ def _write_outputs(us: MarketResult, kr: MarketResult, plain_text: str, html: st
         json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     (SETTINGS.output_dir / f"combined-{stamp}.md").write_text(plain_text, encoding="utf-8")
     (SETTINGS.output_dir / f"combined-{stamp}.html").write_text(html, encoding="utf-8")
+
+
+MAIL_SENT_FLAG = "mail_sent.flag"
+
+
+def _mark_mail_sent() -> None:
+    """The workflow's safety net sends an alert only when this marker is missing."""
+    try:
+        SETTINGS.output_dir.mkdir(parents=True, exist_ok=True)
+        (SETTINGS.output_dir / MAIL_SENT_FLAG).write_text(datetime.now(tz=KST).isoformat(), encoding="utf-8")
+    except OSError as exc:
+        LOGGER.warning("메일 발송 표식 저장 실패: %s", exc)
 
 
 def _run_market(market: str, function, argument) -> MarketResult:
@@ -265,17 +313,26 @@ def run(args: argparse.Namespace) -> int:
     results = {name: futures[name].result() if name in futures else _skipped_result(name) for name in jobs}
     us, kr = results["US"], results["KR"]
 
-    plain_text = build_plain_text_report(us, kr, executed_at_kst)
-    html = build_html_report(us, kr, executed_at_kst)
-    _write_outputs(us, kr, plain_text, html, executed_at_kst)
     is_manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
-    subject = build_combined_subject(us, kr, "[TEST] " if is_manual else "")
+    prefix = "[TEST] " if is_manual else ""
+    try:
+        plain_text = build_plain_text_report(us, kr, executed_at_kst)
+        html = build_html_report(us, kr, executed_at_kst)
+        subject = build_combined_subject(us, kr, prefix)
+    except Exception as exc:  # noqa: BLE001 - the detected drops must still reach the reader
+        LOGGER.exception("리포트 생성 실패 → 간이 리포트로 대체")
+        plain_text, html, subject = build_fallback_report(us, kr, executed_at_kst, exc, prefix)
+    try:
+        _write_outputs(us, kr, plain_text, html, executed_at_kst)
+    except Exception:  # noqa: BLE001 - artifacts are secondary to the notification
+        LOGGER.exception("결과 파일 저장 실패 (메일 발송은 계속)")
     LOGGER.info("메일 제목: %s", subject)
     if args.notify and not args.dry_run:
         try:
             send_gmail_email(plain_text, subject, html)
         except Exception as exc:
             raise NotificationError("SMTP 발송 실패/수락 여부 불명: 중복 발송 방지를 위해 자동 재발송하지 않음") from exc
+        _mark_mail_sent()
         LOGGER.info("Gmail 전송: 완료")
     else:
         LOGGER.info("dry-run/알림 비활성: 이메일 전송 안 함")
@@ -303,6 +360,7 @@ def main() -> int:
                     f"US + KOSPI 급락 모니터 실행이 실패했습니다.\n\n오류: {type(exc).__name__}: {exc}\n",
                     f"{prefix}[급락 모니터][ERROR] 실행 실패",
                 )
+                _mark_mail_sent()
                 LOGGER.info("실패 알림 Gmail 전송: 완료")
             except Exception:
                 LOGGER.exception("실패 알림 Gmail 전송도 실패")
