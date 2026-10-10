@@ -83,7 +83,6 @@ jobs:
         id: monitor
         timeout-minutes: 14
         env:
-          INPUT_RECIPIENT: ${{ inputs.recipient_override }}
           INPUT_SEND_EMAIL: ${{ inputs.send_email }}
           INPUT_DATE_US: ${{ inputs.session_date_us }}
           INPUT_DATE_KR: ${{ inputs.session_date_kr }}
@@ -92,8 +91,14 @@ jobs:
         run: |
           set -euo pipefail
           args=()
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RECIPIENT}" ]]; then
-            export ALERT_EMAIL_RECIPIENT="${INPUT_RECIPIENT}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            # A manual recipient is read from the event payload at run time, never from `env:`
+            # or an expression (those are printed in the job log), and masked for later output.
+            override="$(python3 -c 'import json, os; print(str((json.load(open(os.environ["GITHUB_EVENT_PATH"])).get("inputs") or {}).get("recipient_override") or "").strip())')"
+            if [[ -n "${override}" ]]; then
+              echo "::add-mask::${override}"
+              export ALERT_EMAIL_RECIPIENT="${override}"
+            fi
           fi
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" || "${INPUT_SEND_EMAIL}" == "true" ]]; then
             args+=(--notify)
@@ -141,22 +146,26 @@ jobs:
           TESTS_OUTCOME: ${{ steps.tests.outcome }}
           MONITOR_OUTCOME: ${{ steps.monitor.outcome }}
           JOB_STATUS: ${{ job.status }}
-          INPUT_RECIPIENT: ${{ inputs.recipient_override }}
         run: |
           if [[ -f output/mail_sent.flag ]]; then
             echo "report mail already sent; nothing to do"
             exit 0
           fi
           python3 - <<'PY' || echo "::warning::safety-net mail could not be sent"
-          import os, smtplib, ssl
+          import json, os, smtplib, ssl
           from email.message import EmailMessage
           from email.utils import getaddresses
 
           address = os.environ.get("GMAIL_ADDRESS", "")
           password = "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split())
           recipients = [a for _, a in getaddresses([os.environ.get("ALERT_EMAIL_RECIPIENT", "").replace(";", ",")]) if a]
-          override = os.environ.get("INPUT_RECIPIENT", "").strip()
+          try:  # manual recipient: read from the event payload so it never appears in the log header
+              with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+                  override = str((json.load(handle).get("inputs") or {}).get("recipient_override") or "").strip()
+          except (KeyError, OSError, ValueError, AttributeError):
+              override = ""
           if override:
+              print("::add-mask::" + override)
               recipients = [override]
           if not (address and password and recipients):
               raise SystemExit("mail secrets missing")

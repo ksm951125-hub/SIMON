@@ -40,10 +40,10 @@ jobs:
         env:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          ALERT_EMAIL_RECIPIENT: ${{ inputs.recipient }}
           ORIGINAL_SUBJECT: ${{ inputs.subject }}
         run: |
           python - <<'PY'
+          import json
           import logging
           import os
           from pathlib import Path
@@ -51,6 +51,11 @@ jobs:
           from saved_report import validate_saved_report
 
           logging.basicConfig(level=logging.INFO)
+          # The recipient comes from the event payload, not from env: or an expression, so it is not printed in the log.
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+              recipient = str(json.load(handle)["inputs"]["recipient"]).strip()
+          print("::add-mask::" + recipient)
+          os.environ["ALERT_EMAIL_RECIPIENT"] = recipient
           reports = list(Path("saved-report").glob("combined-*.md"))
           if len(reports) != 1:
               raise RuntimeError("Expected exactly one saved report; refusing ambiguous resend")
