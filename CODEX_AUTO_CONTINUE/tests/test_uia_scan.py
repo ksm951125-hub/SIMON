@@ -24,9 +24,9 @@ class Info:
 
 
 class FakeWin:
-    def __init__(self, title, infos):
+    def __init__(self, title, infos, rect=(0, 0, 1200, 800)):
         self._title = title
-        self.element_info = types.SimpleNamespace(rectangle=R(0, 0, 1200, 800), descendants=lambda: infos)
+        self.element_info = types.SimpleNamespace(rectangle=R(*rect), descendants=lambda: infos)
 
     def window_text(self):
         return self._title
@@ -139,6 +139,99 @@ class UiaScan(unittest.TestCase):
     def test_project_evidence_from_ancestors(self):
         t = Target("MY AI OFFICE 구축하기", "MY AI OFFICE 구축하기")
         self.assertTrue(identify(self.scan(build_tree()), t, require_project=True).ok)
+
+
+def codex_like_tree(active="점검 OCI 이전 준비", limited=True):
+    """스크린샷의 Codex 창(960x1032) 구조: 사이드바에 '프로젝트 머리글' 항목이 형제로 나열되고,
+    선택 상태는 UIA 로 노출되지 않으며, 상단 제목과 하단 한도 카드가 있다."""
+    side = ["새 채팅", "AI STUDIO", "점검 OCI 이전 준비", "MY AI OFFICE 구축하기", "AI 글쓰기", "3_블로그 답방"]
+    infos = [Info("Button", n, (60, 150 + i * 31, 322, 175 + i * 31)) for i, n in enumerate(side)]
+    infos += [Info("Text", active, (392, 62, 700, 80)),                       # 상단 제목
+              Info("Text", "기존 STUDIO에 임시저장과 공개 발행 코드가 모두 있습니다.", (367, 530, 925, 560)),
+              Info("Edit", "", (357, 925, 940, 960), value="Codex와 함께 작업하세요")]
+    if limited:
+        infos += [
+            Info("Text", "사용 한도에 도달했습니다. 계속하려면 요금제를 업그레이드하거나 크레딧을 추가하세요. "
+                         "또는 오후 10:47에 다시 시도하세요.", (400, 665, 920, 705)),
+            Info("Text", "Codex 및 Work 사용량을 모두 사용했습니다", (382, 775, 700, 795)),
+            Info("Text", "크레딧을 추가하거나 플랜을 업그레이드하세요. 또는 오후 10:47에 사용량이 재설정될 때까지 기다리세요.",
+                 (382, 800, 910, 835)),
+            Info("Button", "크레딧 추가", (382, 845, 470, 875)),
+        ]
+    return FakeWin("Codex", infos, rect=(0, 0, 960, 1032))
+
+
+class CodexLikeScreen(unittest.TestCase):
+    def setUp(self):
+        self._saved = install_fake_pywinauto()
+        cfg = Config()
+        cfg.selectors.update({"sidebar_ratio": 0.36, "input_placeholders": ["Codex와 함께 작업하세요"]})
+        self.be = UiaBackend(cfg)
+
+    def tearDown(self):
+        restore(self._saved)
+
+    def scan(self, win):
+        snap = Snapshot(found=True, title=win.window_text())
+        self.be._scan(win, snap)
+        return snap
+
+    def test_banner_live_and_time(self):
+        snap = self.scan(codex_like_tree())
+        det = detect_limit(snap.banner_texts, dt(22, 30, day=26, month=10))
+        self.assertTrue(det.live)
+        self.assertEqual(det.reset.reset_at, dt(22, 47, day=26, month=10))
+        self.assertEqual(snap.input_text, "")            # placeholder 는 초안이 아님
+
+    def test_identifies_interrupted_conversation_by_header_and_sidebar_context(self):
+        snap = self.scan(codex_like_tree())
+        self.assertTrue(identify(snap, Target("AI STUDIO", "점검 OCI 이전 준비")).ok)
+
+    def test_other_conversation_in_same_project_is_rejected(self):
+        snap = self.scan(codex_like_tree())
+        self.assertFalse(identify(snap, Target("AI STUDIO", "MY AI OFFICE 구축하기")).ok)
+
+    def test_wrong_project_is_rejected(self):
+        snap = self.scan(codex_like_tree())
+        self.assertFalse(identify(snap, Target("AI 글쓰기", "점검 OCI 이전 준비")).ok)
+
+    def test_after_reset_card_gone_history_line_not_live(self):
+        win = codex_like_tree()
+        infos = [i for i in win.element_info.descendants() if "사용량을 모두" not in i.name
+                 and "사용량을 모두" not in i.name and i.name not in ("크레딧 추가",)
+                 and "재설정될 때까지" not in i.name and "모두 사용했습니다" not in i.name]
+        snap = self.scan(FakeWin("Codex", infos, rect=(0, 0, 960, 1032)))
+        det = detect_limit(snap.banner_texts, dt(22, 55, day=26, month=10))
+        self.assertIsNotNone(det)
+        self.assertFalse(det.live)
+
+
+class ClaudeLikeScreen(unittest.TestCase):
+    def setUp(self):
+        self._saved = install_fake_pywinauto()
+        cfg = Config()
+        cfg.selectors.update({"sidebar_ratio": 0.32, "input_placeholders": ["/ 입력 시 명령어"]})
+        self.be = UiaBackend(cfg)
+
+    def tearDown(self):
+        restore(self._saved)
+
+    def test_claude_toast_and_identity(self):
+        side = ["새로 만들기", "검색", "1_블로그포스팅", "네이버 블로그 AI 포스팅 생성기 (fork)", "2_숏폼", "네이버 블로그 숏폼 영상 확장"]
+        infos = [Info("Button", n, (970, 60 + i * 40, 1238, 90 + i * 40)) for i, n in enumerate(side)]
+        infos += [Info("Text", "네이버 블로그 AI 포스팅 생성기 (fork)", (1274, 8, 1520, 30)),
+                  Info("Text", "사용량 제한을 초과하여 종료됨", (1311, 852, 1510, 872)),
+                  Info("Text", "오후 11:50에 초기화", (1311, 878, 1440, 896)),
+                  Info("Button", "사용량 추가 구매", (1311, 906, 1436, 930)),
+                  Info("Edit", "", (1290, 955, 1600, 985), value="/ 입력 시 명령어")]
+        snap = Snapshot(found=True, title="Claude")
+        self.be._scan(FakeWin("Claude", infos, rect=(960, 0, 1919, 1032)), snap)
+        det = detect_limit(snap.banner_texts, dt(22, 30, day=26, month=10))
+        self.assertEqual(det.reset.reset_at, dt(23, 50, day=26, month=10))
+        self.assertFalse(det.live)
+        self.assertTrue(identify(snap, Target("1_블로그포스팅", "네이버 블로그 AI 포스팅 생성기 (fork)")).ok)
+        self.assertFalse(identify(snap, Target("2_숏폼", "네이버 블로그 AI 포스팅 생성기 (fork)")).ok)
+        self.assertEqual(snap.input_text, "")
 
 
 if __name__ == "__main__":

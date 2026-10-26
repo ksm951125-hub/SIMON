@@ -20,8 +20,11 @@ class SimulatedCodex(FakeBackend):
     """
 
     def __init__(self, scenario: str = "normal", reset_in_minutes: float = 2.0,
-                 work_seconds: float = 40.0, clock: Callable[[], datetime] = now_kst):
-        super().__init__()
+                 work_seconds: float = 40.0, clock: Callable[[], datetime] = now_kst,
+                 style: str = "codex", conversation: str = "MY AI OFFICE 구축하기",
+                 project: str = "MY AI OFFICE 구축하기"):
+        super().__init__(conversation, project)
+        self.style = style
         self.clock = clock
         self.scenario = scenario
         self.reset_in = reset_in_minutes
@@ -40,8 +43,16 @@ class SimulatedCodex(FakeBackend):
         t = self.clock() + timedelta(minutes=self.reset_in)
         self._reset_at = (t + timedelta(minutes=1)).replace(second=0, microsecond=0) \
             if t.second else t.replace(microsecond=0)
-        self.limit_text = (f"Codex 및 Work 사용량을 모두 사용했습니다. "
-                           f"요청 한도는 {fmt_clock(self._reset_at)}에 재설정됩니다.")
+        t = fmt_clock(self._reset_at)
+        if self.style == "claude":       # 닫을 수 있는 토스트
+            self.limit_text = f"사용량 제한을 초과하여 종료됨\n{t}에 초기화\n더 알아보기\n사용량 추가 구매"
+            self.banner_extra = []
+        else:                            # 하단 카드 + 대화 기록에 남는 오류 줄
+            self.limit_text = ("Codex 및 Work 사용량을 모두 사용했습니다\n"
+                               f"크레딧을 추가하거나 플랜을 업그레이드하세요. 또는 {t}에 사용량이 재설정될 때까지 기다리세요.\n"
+                               "크레딧 추가")
+            self.banner_extra = [f"사용 한도에 도달했습니다. 계속하려면 요금제를 업그레이드하거나 크레딧을 추가하세요. "
+                                 f"또는 {t}에 다시 시도하세요."]
         self.busy = False
 
     def _advance(self) -> None:

@@ -19,6 +19,13 @@ from .timeparse import now_kst
 
 log = logging.getLogger("cac.engine")
 
+
+class _Tagged(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        tag = self.extra.get("name")
+        return (f"[{tag}] {msg}" if tag else msg), kwargs
+STALE_SLACK = timedelta(0)     # 초기화 시각이 지난 기록 줄/알림은 즉시 무시(live 카드만 제한 유지로 본다)
+
 RESET_JITTER = timedelta(seconds=90)
 
 
@@ -70,8 +77,13 @@ class Engine:
     def __init__(self, cfg: Config, backend: CodexBackend, store: StateStore, *,
                  clock: Callable[[], datetime] = now_kst,
                  sleep: Callable[[float], None] = time.sleep,
-                 net_check: Optional[Callable[[], bool]] = None):
+                 net_check: Optional[Callable[[], bool]] = None,
+                 name: str = "", action_lock: Optional[threading.Lock] = None):
+        self.name = name
+        self.log = _Tagged(log, {"name": name})
         self.cfg = cfg
+        # 같은 앱을 대상으로 하는 엔진들이 동시에 창을 조작하지 않도록 직렬화
+        self._action_lock = action_lock or threading.Lock()
         self.backend = backend
         self.store = store
         self.clock = clock
@@ -87,23 +99,23 @@ class Engine:
         c = store.cycle
         if c is not None and c.status == "sending":
             # 전송 도중 비정상 종료: 제출됐는지 알 수 없으므로 중복 방지를 위해 재전송하지 않는다.
-            log.warning("이전 실행이 전송 중 종료됨 → 중복 방지를 위해 재전송하지 않고 종결 처리")
+            self.log.warning("이전 실행이 전송 중 종료됨 → 중복 방지를 위해 재전송하지 않고 종결 처리")
             store.finish_cycle("sent_unconfirmed", self.clock(), dry_run=cfg.dry_run,
                                note="전송 중 프로그램 종료 - 재전송 안 함")
             self._sync_last_send()
         elif c is not None:
-            log.info("이전 실행의 진행 중 주기를 복원: 재개 예정 %s", fmt_clock(c.resume_at))
+            self.log.info("이전 실행의 진행 중 주기를 복원: 재개 예정 %s", fmt_clock(c.resume_at))
 
     # ------------------------------------------------------------------ 제어
     def pause(self) -> None:
         self.store.set_paused(True)
         self._set(program="일시정지", automation_on=False, message="자동화 일시정지됨")
-        log.info("자동화 일시정지")
+        self.log.info("자동화 일시정지")
 
     def resume(self) -> None:
         self.store.set_paused(False)
         self._set(program="실행 중", automation_on=True, message="자동화 재개")
-        log.info("자동화 재개")
+        self.log.info("자동화 재개")
 
     def stop(self) -> None:
         self._stop.set()
@@ -136,7 +148,7 @@ class Engine:
             try:
                 self.tick()
             except Exception as e:      # 감시 루프는 어떤 오류에도 죽지 않는다
-                log.exception("틱 처리 중 예외")
+                self.log.exception("틱 처리 중 예외")
                 self._set(last_error=f"내부 오류: {e}")
             self._stop.wait(self.next_delay())
         self._set(program="중지", automation_on=False, message="중지됨")
@@ -169,7 +181,7 @@ class Engine:
         c = self.store.cycle
         if c and c.resume_at and now - c.resume_at > timedelta(hours=cfg.stale_after_hours):
             self._finish("cancelled", now, note="오래된 주기 폐기")
-            log.warning("재개 예정 시각이 %.0f시간 이상 지난 주기를 폐기", cfg.stale_after_hours)
+            self.log.warning("재개 예정 시각이 %.0f시간 이상 지난 주기를 폐기", cfg.stale_after_hours)
 
         snap = self.backend.snapshot()
         if not snap.ui_available:
@@ -198,16 +210,24 @@ class Engine:
         if self._grace_until and now < self._grace_until:
             self._set(message="절전 복귀/시작 직후 안정화 대기")
             return
-        self._attempt(c, snap, det, now)
+        with self._action_lock:
+            snap = self.backend.snapshot()      # 잠금을 기다리는 사이 다른 대화로 바뀌었을 수 있음
+            det = self._detect(snap, now) if snap.found and snap.ui_available else None
+            self._attempt(c, snap, det, now)
         self._publish_cycle(None, None)
 
     # ------------------------------------------------------------------ 감지
     def _detect(self, snap: Snapshot, now: datetime) -> Optional[LimitDetection]:
         frags = snap.banner_texts if snap.banner_texts is not None \
             else snap.texts[-self.cfg.tail_fragments:]
-        return detect_limit(frags, now, past_grace=timedelta(minutes=self.cfg.past_grace_minutes),
-                            max_len=self.cfg.banner_max_len,
-                            extra_patterns=self.cfg.extra_limit_patterns)
+        det = detect_limit(frags, now, past_grace=timedelta(minutes=self.cfg.past_grace_minutes),
+                           max_len=self.cfg.banner_max_len,
+                           extra_patterns=self.cfg.extra_limit_patterns)
+        if det is not None and not det.live:
+            # 대화 기록에 남은 지난 오류 줄/이미 지난 알림: 초기화 시각이 이미 지났으면 '현재 제한'이 아니다.
+            if det.reset is None or det.reset.reset_at <= now - STALE_SLACK:
+                return None
+        return det
 
     def _detect_wake(self, now: datetime) -> None:
         prev, self._prev_tick = self._prev_tick, now
@@ -217,10 +237,10 @@ class Engine:
             return
         gap = (now - prev).total_seconds()
         if gap < 0:
-            log.warning("시스템 시계가 %.0f초 뒤로 이동", -gap)
+            self.log.warning("시스템 시계가 %.0f초 뒤로 이동", -gap)
         elif gap > max(self.cfg.wake_gap_seconds, 4 * self.cfg.poll_interval_seconds):
             self._grace_until = now + grace
-            log.info("절전/중단 복귀 감지 (틱 간격 %.0f초) → %s초 안정화 후 재확인", gap,
+            self.log.info("절전/중단 복귀 감지 (틱 간격 %.0f초) → %s초 안정화 후 재확인", gap,
                      int(self.cfg.wake_grace_seconds))
 
     def _make_key(self, reset_at: Optional[datetime], now: datetime) -> str:
@@ -241,11 +261,11 @@ class Engine:
             if info:
                 c = Cycle(key, cfg.target.key, info.kind, info.raw, info.reset_at,
                           info.reset_at + delay, now)
-                log.info("사용량 제한 감지: 초기화 %s → 자동 재개 %s", fmt_clock(c.reset_at, now),
+                self.log.info("사용량 제한 감지: 초기화 %s → 자동 재개 %s", fmt_clock(c.reset_at, now),
                          fmt_clock(c.resume_at, now))
             else:
                 c = Cycle(key, cfg.target.key, "unknown", "", None, None, now)
-                log.warning("사용량 제한 감지, 그러나 초기화 시각을 읽지 못함 → 제한 해제 확인 후 재개")
+                self.log.warning("사용량 제한 감지, 그러나 초기화 시각을 읽지 못함 → 제한 해제 확인 후 재개")
             self.store.set_cycle(c)
             return
         if info is None:
@@ -253,7 +273,7 @@ class Engine:
         if c.kind == "unknown":
             c.kind, c.raw, c.reset_at, c.resume_at = info.kind, info.raw, info.reset_at, info.reset_at + delay
             c.key = self._make_key(c.reset_at, now)
-            log.info("초기화 시각 확인: %s", fmt_clock(c.reset_at, now))
+            self.log.info("초기화 시각 확인: %s", fmt_clock(c.reset_at, now))
             self.store.touch()
             return
         # 같은 안내문이면 유지(초기화 시각이 지난 뒤 날짜 재계산으로 24시간 밀리는 것 방지)
@@ -261,7 +281,7 @@ class Engine:
             return
         if abs(info.reset_at - c.reset_at) < RESET_JITTER:
             return
-        log.info("초기화 시각 변경: %s → %s", fmt_clock(c.reset_at, now), fmt_clock(info.reset_at, now))
+        self.log.info("초기화 시각 변경: %s → %s", fmt_clock(c.reset_at, now), fmt_clock(info.reset_at, now))
         c.kind, c.raw, c.reset_at = info.kind, info.raw, info.reset_at
         c.resume_at = info.reset_at + delay
         c.key = self._make_key(c.reset_at, now)
@@ -277,11 +297,11 @@ class Engine:
         if c.kind == "unknown" and c.resume_at is None:
             c.reset_at = now
             c.resume_at = now + timedelta(minutes=self.cfg.resume_delay_minutes)
-            log.info("제한 안내가 사라짐 → %s 에 재개 시도", fmt_clock(c.resume_at, now))
+            self.log.info("제한 안내가 사라짐 → %s 에 재개 시도", fmt_clock(c.resume_at, now))
             self.store.touch()
         if snap.busy and now < (c.resume_at or now):
             self._finish("cancelled", now, note="사용자가 먼저 작업을 재개함")
-            log.info("재개 시각 전에 Codex가 이미 작업 중 → 자동 전송 취소")
+            self.log.info("재개 시각 전에 Codex가 이미 작업 중 → 자동 전송 취소")
 
     # ------------------------------------------------------------------ 전송 시도
     def _attempt(self, c: Cycle, snap: Snapshot, det: Optional[LimitDetection], now: datetime) -> None:
@@ -290,7 +310,7 @@ class Engine:
 
         def defer(reason: str, seconds: float, level: int = logging.INFO) -> None:
             if c.note != reason:
-                log.log(level, "보류: %s", reason)
+                self.log.log(level, "보류: %s", reason)
             c.note = reason
             c.next_check_at = now + timedelta(seconds=seconds)
             self.store.touch()
@@ -298,7 +318,7 @@ class Engine:
 
         def fail_attempt(reason: str) -> None:
             c.attempts += 1
-            log.error("재개 시도 실패(%d/%d): %s", c.attempts, cfg.max_attempts, reason)
+            self.log.error("재개 시도 실패(%d/%d): %s", c.attempts, cfg.max_attempts, reason)
             self._set(last_error=reason)
             if c.attempts >= cfg.max_attempts:
                 self._finish("failed", now, note=reason)
@@ -313,7 +333,7 @@ class Engine:
             return defer("인터넷 연결 없음", cfg.retry_seconds)
 
         if snap.minimized:
-            log.info("Codex 창이 최소화됨 → 포커스를 가져오지 않고 복원")
+            self.log.info("Codex 창이 최소화됨 → 포커스를 가져오지 않고 복원")
             if not self.backend.restore_window():
                 return defer("최소화된 창을 복원하지 못함", cfg.retry_seconds)
             self.sleep(1.0)
@@ -350,12 +370,12 @@ class Engine:
 
         if snap.busy:
             self._finish("cancelled", now, note="대상 대화가 이미 작업 진행 중")
-            log.info("대상 대화가 이미 작업 중 → 자동 전송 취소")
+            self.log.info("대상 대화가 이미 작업 중 → 자동 전송 취소")
             return
         for mk in cfg.completion_markers:
             if mk and any(mk in t for t in snap.texts[-5:]):
                 self._finish("cancelled", now, note=f"작업 완료 표시 감지: {mk}")
-                log.info("작업 완료 표시('%s') 감지 → 전송 안 함", mk)
+                self.log.info("작업 완료 표시('%s') 감지 → 전송 안 함", mk)
                 return
         if not snap.input_found:
             return fail_attempt("메시지 입력창을 찾지 못함")
@@ -368,7 +388,7 @@ class Engine:
             return defer("직전 전송 후 최소 간격 미경과", cfg.retry_seconds)
 
         if cfg.dry_run:
-            log.info("[DRY RUN] 대상 '%s' 에 '%s' 전송 조건 충족 - 실제 전송은 하지 않음",
+            self.log.info("[DRY RUN] 대상 '%s' 에 '%s' 전송 조건 충족 - 실제 전송은 하지 않음",
                      target.label, cfg.send_message)
             self._finish("dry_run", now, dry_run=True, note="전송 안 함")
             self._set(last_result="Dry Run(전송 안 함)", last_send_at=now, message="Dry Run 완료")
@@ -389,14 +409,14 @@ class Engine:
         if v is True:
             self._finish("sent", now, method=res.method)
             self._set(last_result="정상 전송", last_send_at=now, last_error="", message="'계속' 전송 완료")
-            log.info("'%s' 전송 확인됨 (방식: %s)", cfg.send_message, res.method)
+            self.log.info("'%s' 전송 확인됨 (방식: %s)", cfg.send_message, res.method)
         elif v is False:
             fail_attempt("전송 후에도 입력창에 메시지가 남아 있음(제출 안 됨)")
         else:
             self._finish("sent_unconfirmed", now, method=res.method, note="전송 확인 불가")
             self._set(last_result="전송됨(확인 불가)", last_send_at=now,
                       message="전송했으나 결과를 확인하지 못함 - 중복 방지를 위해 재전송 안 함")
-            log.warning("전송 후 결과를 확인하지 못함 - 중복 방지를 위해 재전송하지 않음")
+            self.log.warning("전송 후 결과를 확인하지 못함 - 중복 방지를 위해 재전송하지 않음")
 
     def _finish(self, status: str, now: datetime, **kw) -> None:
         kw.setdefault("dry_run", self.cfg.dry_run)

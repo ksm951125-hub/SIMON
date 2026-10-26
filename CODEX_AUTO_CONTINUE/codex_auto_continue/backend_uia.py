@@ -62,10 +62,10 @@ class UiaBackend(CodexBackend):
                 exe = psutil.Process(pid).name().lower()
                 if exe.startswith(_SELF_EXE_PREFIX):
                     continue
-                if names and not any(n in exe for n in names):
-                    continue
                 title = w.window_text() or ""
-                if regex and not regex.search(title):
+                by_name = bool(names) and any(n in exe for n in names)
+                by_title = regex is not None and bool(regex.search(title))
+                if not (by_name or by_title):
                     continue
                 r = w.rectangle()
                 area = max(0, r.width()) * max(0, r.height())
@@ -116,8 +116,7 @@ class UiaBackend(CodexBackend):
         texts: List[str] = []
         banner: List[str] = []
         headers: List[str] = []
-        selected: List[str] = []
-        ancestors: List[str] = []
+        side: List[Tuple[str, bool, List[str]]] = []     # (이름, 선택됨, 조상 이름들) - 사이드바 문서 순서
         edits: List[Any] = []
         busy = False
 
@@ -142,9 +141,10 @@ class UiaBackend(CodexBackend):
                     busy = True
                 elif ct == "Edit" and info.visible:
                     edits.append(info)
-                if ct in SELECTABLE_TYPES and name and self._is_selected(info):
-                    selected.append(name)
-                    ancestors.extend(self._ancestor_names(info))
+                if ct in ITEM_TYPES and name and 1 < len(name) <= 120 and _rect(info)[2] <= side_x + 20 \
+                        and (not side or side[-1][0] != name):
+                    sel_flag = ct in SELECTABLE_TYPES and self._is_selected(info)
+                    side.append((name, sel_flag, self._ancestor_names(info) if sel_flag else []))
             except Exception:
                 continue
 
@@ -152,8 +152,17 @@ class UiaBackend(CodexBackend):
         snap.banner_texts = banner
         snap.busy = busy
         title_parts = [snap.title] + [p for p in _TITLE_SPLIT.split(snap.title) if p]
+        header_norm = {norm_text(h) for h in headers}
+        active = [i for i, e in enumerate(side) if e[1]]
+        if not active:     # 선택 상태가 UIA 로 노출되지 않으면, 상단 제목과 같은 이름의 사이드바 항목을 활성으로 본다
+            active = [i for i, e in enumerate(side) if norm_text(e[0]) in header_norm]
+        selected = [side[i][0] for i in active]
+        # 프로젝트: 활성 항목의 조상 + 사이드바에서 그 항목 바로 위쪽 항목들(프로젝트 머리글은 보통 형제 항목)
+        context: List[str] = []
+        for i in active:
+            context += side[i][2] + [n for n, _, _ in side[max(0, i - 8):i]]
         snap.conversation_candidates = [c for c in title_parts + selected + headers if c]
-        snap.project_candidates = [c for c in ancestors + headers + title_parts if c]
+        snap.project_candidates = [c for c in context + headers + title_parts if c]
 
         if edits:
             edit = max(edits, key=lambda e: _rect(e)[1])      # 가장 아래의 입력창
@@ -316,35 +325,43 @@ class UiaBackend(CodexBackend):
 
     def _send_via_uia(self, win, text: str) -> ActionResult:
         if self._user_busy_in_codex():
-            return ActionResult(deferred=True, error="사용자가 Codex를 사용 중")
+            return ActionResult(deferred=True, error="사용자가 앱을 사용 중")
         edit, btn = self._find_input_and_button(win)
         if edit is None:
             return ActionResult(error="입력창을 찾지 못함")
+        if btn is None:
+            return ActionResult(error="전송 버튼을 이름으로 찾지 못함")
+        try:
+            was_enabled = bool(btn.is_enabled())
+        except Exception:
+            was_enabled = True
+        if was_enabled:
+            # 빈 입력창에서도 버튼이 활성이면, 앱이 입력 변화에 반응하는지 확인할 수 없다
+            # (값만 바뀌고 실제로는 전송되지 않는 상황을 막기 위해 키보드 방식으로 넘긴다)
+            return ActionResult(error="전송 버튼 활성 상태로 UIA 입력 반영 여부를 검증할 수 없음")
+
+        def clear():
+            try:
+                edit.iface_value.SetValue("")
+            except Exception:
+                pass
         try:
             edit.iface_value.SetValue(text)
         except Exception as e:
             return ActionResult(error=f"ValuePattern 미지원: {e}")
-        time.sleep(0.4)
+        time.sleep(0.5)
         try:
             ok_text = (edit.iface_value.CurrentValue or "").strip() == text
+            enabled_now = bool(btn.is_enabled())
         except Exception:
-            ok_text = False
-        if not ok_text:
-            return ActionResult(error="입력값이 반영되지 않음")
-        if btn is None or not btn.is_enabled():
-            # 앱 상태(React 등)에 반영되지 않아 전송 버튼이 비활성 → 입력을 되돌리고 실패 처리
-            try:
-                edit.iface_value.SetValue("")
-            except Exception:
-                pass
-            return ActionResult(error="전송 버튼이 없거나 비활성")
+            ok_text, enabled_now = False, False
+        if not (ok_text and enabled_now):
+            clear()      # 앱 상태에 반영되지 않음(전송 버튼이 여전히 비활성)
+            return ActionResult(error="UIA 입력이 앱에 반영되지 않음")
         try:
             btn.invoke()
         except Exception as e:
-            try:
-                edit.iface_value.SetValue("")
-            except Exception:
-                pass
+            clear()
             return ActionResult(error=f"전송 버튼 호출 실패: {e}")
         return ActionResult(ok=True, method="uia-invoke")
 

@@ -11,6 +11,8 @@ from .timeparse import ResetInfo, parse_reset_time
 LIMIT_PATTERNS = [
     r"사용량[을를]?\s*(?:모두|전부)\s*(?:사용|소진)",
     r"사용량\s*(?:한도|제한)",
+    r"제한[을를]?\s*초과",
+    r"limit\s+reached",
     r"요청\s*한도",
     r"한도[에를]?\s*(?:도달|초과|소진)",
     r"(?:usage|rate|request|message)\s+limit",
@@ -18,7 +20,13 @@ LIMIT_PATTERNS = [
     r"out\s+of\s+(?:usage|credits|requests)",
     r"limit\s+(?:will\s+)?reset",
 ]
-RESET_WORDS = r"재설정|초기화|리셋|다시\s*사용|\breset|\brenew|available\s+again|try\s+again"
+# '지금도 제한 중'임을 나타내는 문구(하단 카드). 대화 기록에 남는 지난 오류 줄/닫을 수 있는 알림은 live 가 아니다.
+LIVE_PATTERNS = [
+    r"사용량[을를]?\s*(?:모두|전부)\s*(?:사용|소진)",
+    r"크레딧\s*추가",
+    r"out\s+of\s+(?:usage|credits)",
+]
+RESET_WORDS = r"재설정|초기화|리셋|다시\s*사용|다시\s*시도|\breset|\brenew|available\s+again|try\s+again"
 
 _WS = re.compile(r"\s+")
 
@@ -27,6 +35,7 @@ _WS = re.compile(r"\s+")
 class LimitDetection:
     message: str                    # 감지된 안내문(로그용)
     reset: Optional[ResetInfo]      # 초기화 시각(읽지 못하면 None)
+    live: bool = False              # 현재도 제한 중임을 나타내는 카드 문구인가
 
 
 def detect_limit(fragments: Iterable[str], now: datetime, *,
@@ -42,6 +51,7 @@ def detect_limit(fragments: Iterable[str], now: datetime, *,
     frags: List[str] = [_WS.sub(" ", f).strip() for f in fragments if f and f.strip()]
     limit_re = re.compile("|".join(list(LIMIT_PATTERNS) + list(extra_patterns)), re.I)
     reset_re = re.compile(RESET_WORDS, re.I)
+    live_re = re.compile("|".join(LIVE_PATTERNS), re.I)
 
     first_without_reset: Optional[LimitDetection] = None
     for i in range(len(frags) - 1, -1, -1):        # 아래쪽(최신)부터
@@ -56,7 +66,7 @@ def detect_limit(fragments: Iterable[str], now: datetime, *,
                 reset = parse_reset_time(sent, now, past_grace)
                 if reset:
                     break
-        det = LimitDetection(message=joined[:300], reset=reset)
+        det = LimitDetection(message=joined[:300], reset=reset, live=bool(live_re.search(f)))
         if reset:
             return det
         first_without_reset = first_without_reset or det

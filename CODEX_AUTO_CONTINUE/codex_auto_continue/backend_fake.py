@@ -21,6 +21,7 @@ class FakeBackend(CodexBackend):
         self.limit_text = ""              # 비어 있지 않으면 제한 안내가 보임
         self.body_texts: List[str] = ["앞선 작업 내용...", "테스트 코드를 작성했습니다."]
         self.send_behavior = "ok"         # ok | fail | silent | not_submitted | deferred
+        self.banner_extra: List[str] = []  # 항상 하단에 남는 줄(대화 기록의 지난 오류 줄 등)
         self.banner_zone = True           # False면 banner_texts=None (꼬리 텍스트로 감지)
         # 기록
         self.sent: List[str] = []
@@ -35,7 +36,7 @@ class FakeBackend(CodexBackend):
             return Snapshot(ui_available=False)
         if not self.window_found:
             return Snapshot(found=False)
-        banner = [self.limit_text] if self.limit_text else []
+        banner = list(self.banner_extra) + (self.limit_text.split("\n") if self.limit_text else [])
         texts = list(self.body_texts) + banner
         return Snapshot(
             ui_available=True, found=True, minimized=self.minimized,

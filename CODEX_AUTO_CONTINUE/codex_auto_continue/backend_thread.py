@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Optional
 
 from .models import ActionResult, CodexBackend, Snapshot, Target
 
 
+def new_uia_executor() -> ThreadPoolExecutor:
+    """프로세스 전체에서 UIA/COM 호출을 처리할 단일 스레드 (모든 앱 프로필이 공유)."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="uia")
+
+
 class ThreadedBackend(CodexBackend):
-    def __init__(self, inner: CodexBackend, timeout: float = 120.0):
+    def __init__(self, inner: CodexBackend, timeout: float = 120.0,
+                 executor: Optional[ThreadPoolExecutor] = None):
         self._inner = inner
         self._timeout = timeout
-        self._ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="uia")
+        self._own = executor is None
+        self._ex = executor or new_uia_executor()
 
     def _call(self, fn, *a):
         return self._ex.submit(fn, *a).result(timeout=self._timeout)
@@ -32,4 +39,5 @@ class ThreadedBackend(CodexBackend):
         return self._call(self._inner.list_conversations)
 
     def close(self) -> None:
-        self._ex.shutdown(wait=False)
+        if self._own:
+            self._ex.shutdown(wait=False)

@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import copy
 from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .models import Target
 
@@ -26,7 +27,7 @@ def app_home() -> Path:
 def default_selectors() -> Dict[str, Any]:
     # Codex 앱 UI 문구/구조는 inspect 명령으로 확인 후 config.json 의 selectors 로 보정할 수 있다.
     return {
-        "send_button_names": ["전송", "보내기", "제출", "Send", "Submit"],
+        "send_button_names": ["전송", "보내기", "메시지 보내기", "제출", "Send", "Send message", "Submit"],
         "stop_button_names": ["중지", "중단", "작업 중지", "Stop", "Interrupt"],
         "busy_text_regex": r"(작업 중|생각 중|실행 중|Working|Thinking|Running)",
         "input_placeholders": [],
@@ -40,7 +41,7 @@ def default_selectors() -> Dict[str, Any]:
 
 @dataclass
 class Config:
-    target: Target = field(default_factory=lambda: Target("MY AI OFFICE 구축하기", "MY AI OFFICE 구축하기"))
+    target: Target = field(default_factory=Target)
     send_message: str = "계속"
     resume_delay_minutes: float = 2.0         # 초기화 시각 + N분 뒤 재개
     poll_interval_seconds: float = 15.0       # 평상시 감시 주기
@@ -117,27 +118,136 @@ class Config:
             self.send_message = "계속"
 
 
-def config_path(home: Path = None) -> Path:
+# ---------------------------------------------------------------------------
+# 앱별 프로필 (GPT Codex, Claude Code ...). 각 프로필은 자기 대상 대화·상태·주기를 따로 가진다.
+# 기본값은 스크린샷(Codex 사이드바 폭, 입력창 placeholder 등)을 반영한 것이며 inspect 로 보정 가능.
+# ---------------------------------------------------------------------------
+APP_PRESETS: Dict[str, Dict[str, Any]] = {
+    "codex": {
+        "process_names": ["codex"],
+        "selectors": {"sidebar_ratio": 0.36, "input_placeholders": ["Codex와 함께 작업하세요"]},
+    },
+    "claude": {
+        "process_names": ["claude"],
+        "selectors": {"sidebar_ratio": 0.32, "input_placeholders": ["/ 입력 시 명령어"]},
+    },
+}
+
+GLOBAL_EXCLUDE = ("target", "process_names", "window_title_regex", "selectors")
+
+
+def default_profile_specs() -> List[Dict[str, Any]]:
+    return [
+        {"name": "codex", "label": "GPT Codex", "app": "codex", "enabled": True,
+         "target": {"project": "AI STUDIO", "conversation": "점검 OCI 이전 준비"}},
+        {"name": "claude", "label": "Claude Code", "app": "claude", "enabled": True,
+         "target": {"project": "1_블로그포스팅", "conversation": "네이버 블로그 AI 포스팅 생성기 (fork)"}},
+        # 같은 Codex 의 다른 대화도 쓰려면 enabled 를 true 로 (같은 앱은 순차 처리됨)
+        {"name": "codex-myai", "label": "GPT Codex (MY AI OFFICE)", "app": "codex", "enabled": False,
+         "target": {"project": "AI STUDIO", "conversation": "MY AI OFFICE 구축하기"}},
+    ]
+
+
+@dataclass
+class Profile:
+    name: str
+    label: str
+    app: str
+    enabled: bool
+    cfg: Config
+    spec: Dict[str, Any]
+
+    @property
+    def lock_key(self) -> str:
+        return ",".join(sorted(n.lower() for n in self.cfg.process_names)) or self.name
+
+
+@dataclass
+class Settings:
+    raw_base: Dict[str, Any]
+    profiles: List[Profile]
+
+    def apply_global(self, key: str, value: Any) -> None:
+        self.raw_base[key] = value
+        for p in self.profiles:
+            if key not in p.spec:
+                setattr(p.cfg, key, value)
+                p.cfg.validate()
+
+    def set_target(self, profile: Profile, project: str, conversation: str) -> None:
+        profile.cfg.target = Target(project, conversation, True)
+        profile.spec["target"] = {"project": project, "conversation": conversation}
+
+
+def build_profile(spec: Dict[str, Any], base: Dict[str, Any]) -> Profile:
+    app = str(spec.get("app", "codex"))
+    preset = copy.deepcopy(APP_PRESETS.get(app, {}))
+    merged: Dict[str, Any] = dict(base)
+    merged.update({k: v for k, v in preset.items() if k != "selectors"})
+    sel = dict(preset.get("selectors", {}))
+    sel.update(spec.get("selectors", {}))
+    merged["selectors"] = sel
+    for k, v in spec.items():
+        if k not in ("name", "label", "app", "enabled", "selectors"):
+            merged[k] = v
+    cfg = Config.from_dict(merged)
+    name = str(spec.get("name") or app)
+    return Profile(name, str(spec.get("label") or name), app, bool(spec.get("enabled", True)), cfg, spec)
+
+
+def default_base() -> Dict[str, Any]:
+    return {k: v for k, v in Config().to_dict().items() if k not in GLOBAL_EXCLUDE}
+
+
+def settings_path(home: Optional[Path] = None) -> Path:
     return (home or app_home()) / "config.json"
 
 
-def load_config(home: Path = None) -> Config:
-    p = config_path(home)
+config_path = settings_path
+
+
+def load_settings(home: Optional[Path] = None) -> Settings:
+    p = settings_path(home)
+    data: Dict[str, Any] = {}
     if p.exists():
         try:
-            return Config.from_dict(json.loads(p.read_text(encoding="utf-8")))
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("config 최상위가 객체가 아님")
         except (OSError, ValueError):
             try:
                 p.replace(p.with_suffix(".bad"))
             except OSError:
                 pass
-    cfg = Config()
-    save_config(cfg, home)
-    return cfg
+            data = {}
+    specs = data.get("profiles") if isinstance(data.get("profiles"), list) else None
+    legacy_target = data.get("target") if isinstance(data.get("target"), dict) else None
+    base = default_base()
+    base.update({k: v for k, v in data.items() if k not in GLOBAL_EXCLUDE and k != "profiles"})
+    if specs is None:
+        specs = default_profile_specs()
+        if legacy_target:          # 1.0 설정 파일 이전
+            specs[0]["target"] = legacy_target
+    profiles, seen = [], set()
+    for sp in specs:
+        if not isinstance(sp, dict):
+            continue
+        prof = build_profile(sp, base)
+        if prof.name in seen:
+            continue
+        seen.add(prof.name)
+        profiles.append(prof)
+    st = Settings(base, profiles)
+    if not p.exists() or "profiles" not in data:
+        save_settings(st, home)
+    return st
 
 
-def save_config(cfg: Config, home: Path = None) -> None:
-    p = config_path(home)
+def save_settings(st: Settings, home: Optional[Path] = None) -> None:
+    p = settings_path(home)
+    out = dict(st.raw_base)
+    out["profiles"] = [pr.spec | {"name": pr.name, "label": pr.label, "app": pr.app, "enabled": pr.enabled}
+                       for pr in st.profiles]
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, p)

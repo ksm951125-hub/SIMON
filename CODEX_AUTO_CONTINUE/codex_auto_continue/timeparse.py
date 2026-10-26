@@ -33,6 +33,7 @@ _TIME_RE = re.compile(
     r"(?:\s*(?P<post>AM\b|PM\b|a\.m\.|p\.m\.))?",
     re.I,
 )
+_TIME_AMPM_ONLY = re.compile(r"\b(?P<h>\d{1,2})\s*(?P<post>am|pm)\b", re.I)   # "5pm"
 _DATE_KO = re.compile(r"(?:(?P<y>\d{4})\s*년\s*)?(?P<mo>\d{1,2})\s*월\s*(?P<d>\d{1,2})\s*일")
 _DATE_ISO = re.compile(r"(?P<y>\d{4})[-./](?P<mo>\d{1,2})[-./](?P<d>\d{1,2})")
 _DATE_EN = re.compile(
@@ -71,11 +72,11 @@ def parse_reset_time(text: str, now: datetime,
     now = now.astimezone(KST)
     t = unicodedata.normalize("NFKC", text or "")
 
-    m = _TIME_RE.search(t)
+    m = _TIME_RE.search(t) or _TIME_AMPM_ONLY.search(t)
     if m:
         h = int(m["h"])
-        mi = int(m["m"] or m["m2"] or 0)
-        ampm = m["pre"] or m["post"] or ""
+        mi = int((m.groupdict().get("m") or m.groupdict().get("m2")) or 0)
+        ampm = m.groupdict().get("pre") or m["post"] or ""
         hh = _hour_24(h, ampm) if ampm else (h if 0 <= h < 24 else None)
         if hh is None or not 0 <= mi < 60:
             return None

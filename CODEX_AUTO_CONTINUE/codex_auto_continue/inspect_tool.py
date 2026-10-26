@@ -13,7 +13,7 @@ from .identify import identify
 from .timeparse import now_kst
 
 
-def run_inspect(cfg: Config, home: Path, max_lines: int = 4000) -> int:
+def run_inspect(cfg: Config, home: Path, max_lines: int = 4000, tag: str = "app") -> int:
     if sys.platform != "win32":
         print("inspect 는 Windows 에서 Codex 앱이 실행 중일 때 사용합니다.")
         return 2
@@ -30,7 +30,7 @@ def run_inspect(cfg: Config, home: Path, max_lines: int = 4000) -> int:
             found_any = True
             print(f"  pid={p.info['pid']:<6} {p.info['name']}  {p.info['exe']}")
     if not found_any:
-        print("  (없음) Codex 앱을 먼저 실행하세요. process_names 설정도 확인하세요:", cfg.process_names)
+        print("  (없음) 대상 앱을 먼저 실행하세요. process_names 설정도 확인하세요:", cfg.process_names)
 
     print("\n=== 2) 최상위 창 목록 ===")
     desk = Desktop(backend="uia")
@@ -55,7 +55,7 @@ def run_inspect(cfg: Config, home: Path, max_lines: int = 4000) -> int:
     out_dir = home / "inspect"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tree_file = out_dir / f"uia_tree_{stamp}.txt"
+    tree_file = out_dir / f"uia_tree_{tag}_{stamp}.txt"
     print(f"\n=== 3) UI Automation 트리 덤프 → {tree_file} ===")
     count = _dump_tree(win, tree_file, max_lines)
     print(f"  {count}개 요소 기록. 요소가 거의 없다면 Chromium 접근성이 꺼져 있는 것입니다 (README 참고).")
@@ -81,10 +81,11 @@ def run_inspect(cfg: Config, home: Path, max_lines: int = 4000) -> int:
             print("  초기화 시각    : 읽지 못함")
     else:
         print("  사용량 제한    : 감지되지 않음")
+    print("  하단 영역 live 여부:", None if det is None else det.live)
     ident = identify(snap, cfg.target, require_project=cfg.require_project_match, mode=cfg.match_mode)
     print(f"  대상 대화 식별 : {'OK' if ident.ok else 'FAIL'} - {ident.reason}  (대상: {cfg.target.label})")
     print("\n사이드바 대화 목록:", be.list_conversations()[:30])
-    print(f"\n문제가 있으면 위 출력과 {tree_file} 를 기준으로 data/config.json 의 selectors 를 조정하세요.")
+    print(f"\n문제가 있으면 위 출력과 {tree_file} 를 기준으로 data/config.json 해당 프로필의 selectors 를 조정하세요.")
     return 0
 
 

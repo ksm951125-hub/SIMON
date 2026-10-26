@@ -1,4 +1,4 @@
-"""간단한 관리 화면(tkinter) + 시스템 트레이(pystray)."""
+"""간단한 관리 화면(tkinter) + 시스템 트레이(pystray). 앱(프로필)마다 한 줄씩 표시한다."""
 from __future__ import annotations
 
 import logging
@@ -6,12 +6,16 @@ import os
 import threading
 
 from . import APP_NAME, autostart
-from .config import save_config
+from .config import save_settings
 from .fmt import fmt_clock, fmt_remaining
-from .runtime import Runtime
+from .runtime import Runtime, Unit
 from .timeparse import now_kst
 
 log = logging.getLogger("cac.ui")
+
+COLUMNS = [("app", "앱", 110), ("conv", "감시 대화", 190), ("codex", "앱 상태", 80), ("reset", "초기화", 90),
+           ("resume", "자동 재개", 90), ("remain", "남은 시간", 80), ("last", "마지막 실행", 110),
+           ("auto", "자동화", 55)]
 
 
 def _make_icon(color: str):
@@ -19,7 +23,7 @@ def _make_icon(color: str):
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((4, 4, 60, 60), fill=color)
-    d.polygon([(24, 18), (24, 46), (48, 32)], fill="white")     # ▶ (계속)
+    d.polygon([(24, 18), (24, 46), (48, 32)], fill="white")
     return img
 
 
@@ -30,86 +34,109 @@ class App:
         self.tk, self.ttk = tk, ttk
         self.rt = rt
         self.root = tk.Tk()
-        suffix = (" [TEST MODE]" if rt.test_mode else "") + (" [DRY RUN]" if rt.cfg.dry_run else "")
+        suffix = (" [TEST MODE]" if rt.test_mode else "") + (" [DRY RUN]" if rt.dry_run else "")
         self.root.title(APP_NAME + suffix)
-        self.root.geometry("520x470")
+        self.root.geometry("920x430")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.vars = {}
         self.tray = None
         self._tray_color = None
         self._build()
         self._start_tray()
-        self.thread = threading.Thread(target=rt.engine.run_forever, name="engine", daemon=True)
-        self.thread.start()
+        rt.start()
         self.refresh()
 
-    # ------------------------------------------------------------ 화면 구성
+    # ------------------------------------------------------------ 구성
     def _build(self):
         tk, ttk = self.tk, self.ttk
-        frm = ttk.Frame(self.root, padding=12)
+        frm = ttk.Frame(self.root, padding=10)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text=APP_NAME, font=("Malgun Gothic", 14, "bold")).pack(anchor="w")
-        grid = ttk.Frame(frm)
-        grid.pack(fill="x", pady=8)
-        rows = [("프로그램 상태", "program"), ("Codex 상태", "codex"), ("감시 프로젝트", "project"),
-                ("감시 대화", "conv"), ("초기화 시간", "reset"), ("자동 재개", "resume"),
-                ("남은 시간", "remain"), ("마지막 실행", "last"), ("마지막 전송 시각", "lasttime"),
-                ("자동화", "auto"), ("현재 동작", "msg"), ("마지막 오류", "err")]
-        for i, (label, key) in enumerate(rows):
-            ttk.Label(grid, text=label, width=14).grid(row=i, column=0, sticky="nw", pady=1)
-            v = tk.StringVar(value="-")
-            self.vars[key] = v
-            ttk.Label(grid, textvariable=v, wraplength=340, justify="left").grid(row=i, column=1, sticky="w")
+        top = ttk.Frame(frm)
+        top.pack(fill="x")
+        ttk.Label(top, text=APP_NAME, font=("Malgun Gothic", 14, "bold")).pack(side="left")
+        self.v_prog = tk.StringVar(value="-")
+        ttk.Label(top, textvariable=self.v_prog).pack(side="right")
+
+        self.tree = ttk.Treeview(frm, columns=[c[0] for c in COLUMNS], show="headings", height=4,
+                                 selectmode="browse")
+        for key, title, w in COLUMNS:
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=w, anchor="w")
+        self.tree.pack(fill="x", pady=8)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._show_detail())
+
+        self.detail = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.detail, wraplength=880, justify="left").pack(anchor="w", pady=4, fill="x")
+
         bar = ttk.Frame(frm)
         bar.pack(fill="x", pady=6)
-        self.btn_start = ttk.Button(bar, text="자동화 시작", command=self.on_start)
-        self.btn_pause = ttk.Button(bar, text="자동화 일시정지", command=self.on_pause)
-        self.btn_start.grid(row=0, column=0, padx=2, pady=2)
-        self.btn_pause.grid(row=0, column=1, padx=2, pady=2)
-        ttk.Button(bar, text="감시 대상 대화 선택", command=self.on_target).grid(row=0, column=2, padx=2)
-        ttk.Button(bar, text="실행 로그", command=self.on_log).grid(row=1, column=0, padx=2, pady=2)
-        ttk.Button(bar, text="설정", command=self.on_settings).grid(row=1, column=1, padx=2)
-        ttk.Button(bar, text="종료", command=self.quit).grid(row=1, column=2, padx=2)
+        items = [("전체 시작", self.on_start_all), ("전체 일시정지", self.on_pause_all),
+                 ("선택 앱 켜기/끄기", self.on_toggle_selected), ("감시 대상 대화 선택", self.on_target),
+                 ("실행 로그", self.on_log), ("설정", self.on_settings), ("종료", self.quit)]
+        for i, (t, cmd) in enumerate(items):
+            ttk.Button(bar, text=t, command=cmd).grid(row=0, column=i, padx=2)
+        self._rows = {}
+        for u in self.rt.units:
+            self._rows[u.profile.name] = self.tree.insert("", "end", iid=u.profile.name, values=[""] * len(COLUMNS))
+        if self._rows:
+            self.tree.selection_set(next(iter(self._rows)))
 
-    # ------------------------------------------------------------ 상태 갱신
+    def _selected_unit(self) -> Unit:
+        sel = self.tree.selection()
+        return self.rt.unit(sel[0]) if sel else self.rt.units[0]
+
+    def _show_detail(self):
+        u = self._selected_unit()
+        st = u.engine.get_status()
+        c = u.profile.cfg
+        self.detail.set(f"[{u.profile.label}] 프로젝트: {c.target.project or '-'} | 현재 동작: {st.message or '-'}\n"
+                        f"마지막 전송: {fmt_clock(st.last_send_at, now_kst(), seconds=True) if st.last_send_at else '-'}"
+                        f" | 마지막 오류: {st.last_error or '-'}")
+
+    # ------------------------------------------------------------ 갱신
     def refresh(self):
         try:
-            st = self.rt.engine.get_status()
             now = now_kst()
-            cfg = self.rt.cfg
-            v = self.vars
-            v["program"].set(st.program)
-            v["codex"].set(st.codex)
-            v["project"].set(cfg.target.project or "-")
-            v["conv"].set(cfg.target.conversation or "-")
-            v["reset"].set(fmt_clock(st.reset_at, now) if st.reset_at else "-")
-            v["resume"].set(fmt_clock(st.resume_at, now) if st.resume_at else "-")
-            v["remain"].set(fmt_remaining(st.resume_at - now) if st.resume_at else "-")
-            v["last"].set(st.last_result)
-            v["lasttime"].set(fmt_clock(st.last_send_at, now, seconds=True) if st.last_send_at else "-")
-            v["auto"].set("ON" if st.automation_on else "OFF")
-            v["msg"].set(st.message or "-")
-            v["err"].set(st.last_error or "-")
-            paused = self.rt.store.paused
-            self.btn_start.state(["!disabled" if paused else "disabled"])
-            self.btn_pause.state(["disabled" if paused else "!disabled"])
-            self._update_tray(st, paused)
+            worst = "ok"
+            for u in self.rt.units:
+                st = u.engine.get_status()
+                c = u.profile.cfg
+                paused = u.store.paused
+                self.tree.item(u.profile.name, values=[
+                    u.profile.label, c.target.conversation or "-", st.codex,
+                    fmt_clock(st.reset_at, now) if st.reset_at else "-",
+                    fmt_clock(st.resume_at, now) if st.resume_at else "-",
+                    fmt_remaining(st.resume_at - now) if st.resume_at else "-",
+                    st.last_result, "OFF" if paused else "ON"])
+                if paused:
+                    worst = worst if worst != "ok" else "paused"
+                elif st.codex == "연결 안 됨":
+                    worst = "warn"
+                elif st.limit_detected and worst == "ok":
+                    worst = "limit"
+            n_on = sum(1 for u in self.rt.units if not u.store.paused)
+            self.v_prog.set(f"프로그램: 실행 중 | 자동화 ON {n_on}/{len(self.rt.units)}")
+            self._show_detail()
+            self._update_tray(worst)
         except Exception:
             log.exception("화면 갱신 오류")
         self.root.after(1000, self.refresh)
 
     # ------------------------------------------------------------ 동작
-    def on_start(self):
-        self.rt.engine.resume()
+    def on_start_all(self):
+        self.rt.resume_all()
 
-    def on_pause(self):
-        self.rt.engine.pause()
+    def on_pause_all(self):
+        self.rt.pause_all()
+
+    def on_toggle_selected(self):
+        u = self._selected_unit()
+        (u.engine.resume if u.store.paused else u.engine.pause)()
 
     def on_log(self):
         tk = self.tk
         win = tk.Toplevel(self.root)
         win.title("실행 로그")
-        win.geometry("760x420")
+        win.geometry("860x440")
         txt = tk.Text(win, wrap="none", font=("Consolas", 9))
         sb = self.ttk.Scrollbar(win, command=txt.yview)
         txt.configure(yscrollcommand=sb.set)
@@ -142,22 +169,36 @@ class App:
 
     def on_target(self):
         tk, ttk = self.tk, self.ttk
-        cfg = self.rt.cfg
         win = tk.Toplevel(self.root)
         win.title("감시 대상 대화 선택")
-        win.geometry("460x420")
+        win.geometry("480x470")
         frm = ttk.Frame(win, padding=10)
         frm.pack(fill="both", expand=True)
-        pv, cv = tk.StringVar(value=cfg.target.project), tk.StringVar(value=cfg.target.conversation)
-        ttk.Label(frm, text="프로젝트 이름").pack(anchor="w")
+        cur = self._selected_unit()
+        names = [u.profile.label for u in self.rt.units]
+        ttk.Label(frm, text="앱").pack(anchor="w")
+        av = tk.StringVar(value=cur.profile.label)
+        combo = ttk.Combobox(frm, textvariable=av, values=names, state="readonly")
+        combo.pack(fill="x")
+        pv, cv = tk.StringVar(), tk.StringVar()
+        ttk.Label(frm, text="프로젝트 이름").pack(anchor="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=pv).pack(fill="x")
-        ttk.Label(frm, text="대화 이름 (Codex 사이드바에 표시되는 제목과 동일하게)").pack(anchor="w", pady=(8, 0))
+        ttk.Label(frm, text="대화 이름 (사이드바/상단에 표시되는 제목과 동일하게)").pack(anchor="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=cv).pack(fill="x")
-        ttk.Label(frm, text="Codex 에서 읽은 대화 목록 (선택하면 대화 이름에 채워짐)").pack(anchor="w", pady=(8, 0))
-        lb = tk.Listbox(frm, height=10)
+        ttk.Label(frm, text="앱에서 읽은 항목 (선택하면 대화 이름에 채워짐)").pack(anchor="w", pady=(8, 0))
+        lb = tk.Listbox(frm, height=9)
         lb.pack(fill="both", expand=True)
         status = tk.StringVar(value="")
         ttk.Label(frm, textvariable=status).pack(anchor="w")
+
+        def unit():
+            return next(u for u in self.rt.units if u.profile.label == av.get())
+
+        def fill():
+            c = unit().profile.cfg.target
+            pv.set(c.project)
+            cv.set(c.conversation)
+        fill()
 
         def pick(_e=None):
             if lb.curselection():
@@ -165,34 +206,38 @@ class App:
         lb.bind("<<ListboxSelect>>", pick)
 
         def load():
+            u = unit()
             try:
-                names = self.rt.backend.list_conversations()
+                found, err = u.backend.list_conversations(), ""
             except Exception as e:
-                names, err = [], str(e)
-            else:
-                err = ""
+                found, err = [], str(e)
 
             def done():
                 if not win.winfo_exists():
                     return
                 lb.delete(0, "end")
-                for n in names:
+                for n in found:
                     lb.insert("end", n)
-                status.set(f"{len(names)}개 항목" if names else (err or "목록을 읽지 못함 - 직접 입력하세요"))
+                status.set(f"{len(found)}개 항목" if found else (err or "목록을 읽지 못함 - 직접 입력하세요"))
             self.root.after(0, done)
 
+        def reload_all(_e=None):
+            fill()
+            threading.Thread(target=load, daemon=True).start()
+        combo.bind("<<ComboboxSelected>>", reload_all)
+
         def save():
-            cfg.target.project, cfg.target.conversation = pv.get().strip(), cv.get().strip()
-            if not cfg.target.conversation:
+            if not cv.get().strip():
                 status.set("대화 이름은 필수입니다")
                 return
-            save_config(cfg, self.rt.home)
-            log.info("감시 대상 변경: %s", cfg.target.label)
+            u = unit()
+            self.rt.settings.set_target(u.profile, pv.get().strip(), cv.get().strip())
+            save_settings(self.rt.settings, self.rt.home)
+            log.info("[%s] 감시 대상 변경: %s", u.profile.name, u.profile.cfg.target.label)
             win.destroy()
         bar = ttk.Frame(frm)
         bar.pack(fill="x", pady=6)
-        ttk.Button(bar, text="목록 새로고침", command=lambda: threading.Thread(target=load, daemon=True).start()
-                   ).pack(side="left")
+        ttk.Button(bar, text="목록 새로고침", command=reload_all).pack(side="left")
         ttk.Button(bar, text="저장", command=save).pack(side="right")
         threading.Thread(target=load, daemon=True).start()
 
@@ -200,7 +245,7 @@ class App:
         tk, ttk = self.tk, self.ttk
         cfg = self.rt.cfg
         win = tk.Toplevel(self.root)
-        win.title("설정")
+        win.title("설정 (모든 앱 공통)")
         frm = ttk.Frame(win, padding=12)
         frm.pack(fill="both", expand=True)
         fields = [("재개 지연(분, 초기화 후)", "resume_delay_minutes", float),
@@ -234,15 +279,15 @@ class App:
 
         def save():
             try:
-                for key, (v, typ) in vars_.items():
-                    setattr(cfg, key, typ(v.get().strip()))
-                cfg.send_method = mv.get()
-                for key, b in bvars.items():
-                    setattr(cfg, key, b.get())
-                cfg.validate()
-                save_config(cfg, self.rt.home)
-                if not self.rt.test_mode and av.get() != autostart.is_enabled():
-                    autostart.set_enabled(av.get())
+                new = {k: typ(v.get().strip()) for k, (v, typ) in vars_.items()}
+                new["send_method"] = mv.get()
+                new.update({k: b.get() for k, b in bvars.items()})
+                for k, val in new.items():
+                    self.rt.settings.apply_global(k, val)
+                if not self.rt.test_mode:
+                    save_settings(self.rt.settings, self.rt.home)
+                    if av.get() != autostart.is_enabled():
+                        autostart.set_enabled(av.get())
             except Exception as e:
                 msg.set(f"저장 실패: {e}")
                 return
@@ -259,26 +304,28 @@ class App:
             return
         menu = pystray.Menu(
             pystray.MenuItem("열기", lambda: self.root.after(0, self.show), default=True),
-            pystray.MenuItem("자동화 시작", lambda: self.root.after(0, self.on_start)),
-            pystray.MenuItem("자동화 일시정지", lambda: self.root.after(0, self.on_pause)),
+            pystray.MenuItem("전체 시작", lambda: self.root.after(0, self.on_start_all)),
+            pystray.MenuItem("전체 일시정지", lambda: self.root.after(0, self.on_pause_all)),
             pystray.MenuItem("실행 로그", lambda: self.root.after(0, self.on_log)),
             pystray.MenuItem("종료", lambda: self.root.after(0, self.quit)),
         )
         self.tray = pystray.Icon("cac", _make_icon("#6b7280"), APP_NAME, menu)
         self.tray.run_detached()
 
-    def _update_tray(self, st, paused: bool):
+    def _update_tray(self, worst: str):
         if not self.tray:
             return
-        color = ("#6b7280" if paused else "#ef4444" if st.last_error and st.codex == "연결 안 됨"
-                 else "#f59e0b" if st.limit_detected else "#22c55e")
+        color = {"ok": "#22c55e", "limit": "#f59e0b", "warn": "#ef4444", "paused": "#6b7280"}[worst]
         if color != self._tray_color:
             self._tray_color = color
             self.tray.icon = _make_icon(color)
-        tip = f"{APP_NAME}\n{st.program} | Codex: {st.codex}"
-        if st.resume_at:
-            tip += f"\n자동 재개 {fmt_clock(st.resume_at, now_kst())}"
-        self.tray.title = tip[:120]
+        now = now_kst()
+        lines = [APP_NAME]
+        for u in self.rt.units:
+            st = u.engine.get_status()
+            tail = f"재개 {fmt_clock(st.resume_at, now)}" if st.resume_at else st.codex
+            lines.append(f"{u.profile.label}: {tail}")
+        self.tray.title = "\n".join(lines)[:120]
 
     def show(self):
         self.root.deiconify()
@@ -292,7 +339,7 @@ class App:
 
     def quit(self):
         log.info("프로그램 종료")
-        self.rt.engine.stop()
+        self.rt.stop()
         if self.tray:
             try:
                 self.tray.stop()
